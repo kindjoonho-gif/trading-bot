@@ -1,0 +1,11 @@
+# Target weights — keys may be 6-digit code or Korean/English name.
+# Sum must be <= 1.0. Residual = cash.
+broker: KIS
+
+holdings:
+  "005930": 0.30     # 삼성전자
+  "000660": 0.20     # SK하이닉스
+  "035420": 0.10     # NAVER
+  # residual 0.40 stays as cash
+
+drift_tolerance: 0.01
