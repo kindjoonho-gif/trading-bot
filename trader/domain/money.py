@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from decimal import Decimal, ROUND_DOWN
+from decimal import ROUND_DOWN, Decimal
 
 ZERO = Decimal("0")
 
@@ -15,7 +15,9 @@ def to_decimal(value: str | int | float | Decimal) -> Decimal:
 
 def round_toward_zero(value: Decimal) -> Decimal:
     """Floor magnitude, preserve sign. Used for share quantities."""
-    return value.to_integral_value(rounding=ROUND_DOWN) if value >= 0 else -((-value).to_integral_value(rounding=ROUND_DOWN))
+    if value >= 0:
+        return value.to_integral_value(rounding=ROUND_DOWN)
+    return -((-value).to_integral_value(rounding=ROUND_DOWN))
 
 
 def format_krw(value: Decimal) -> str:

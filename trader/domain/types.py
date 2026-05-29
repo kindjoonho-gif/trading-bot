@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from decimal import Decimal
-from enum import Enum
+from enum import StrEnum
 from typing import NewType
 
 from pydantic import BaseModel, ConfigDict
@@ -10,17 +10,17 @@ Symbol = NewType("Symbol", str)
 OrderId = NewType("OrderId", str)
 
 
-class Side(str, Enum):
+class Side(StrEnum):
     BUY = "buy"
     SELL = "sell"
 
 
-class OrderKind(str, Enum):
+class OrderKind(StrEnum):
     MARKET = "market"
     LIMIT = "limit"
 
 
-class OrderStatus(str, Enum):
+class OrderStatus(StrEnum):
     PENDING = "pending"
     PARTIAL = "partial"
     FILLED = "filled"
