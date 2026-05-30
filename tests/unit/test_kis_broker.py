@@ -11,7 +11,7 @@ import respx
 
 from trader.brokers.kis import KISApiError, KISAuthError, KISBroker, _TokenCache
 from trader.config.settings import Settings
-from trader.domain.types import Symbol
+from trader.domain.types import OrderId, OrderKind, OrderStatus, Side, Symbol
 
 MOCK_BASE = "https://openapivts.koreainvestment.com:29443"
 
@@ -420,3 +420,231 @@ class TestGetQuote:
                 q = await broker.get_quote(Symbol("005930"))
                 assert q.last == Decimal("2")
                 assert quote_route.call_count == 2
+
+
+class TestPlaceOrder:
+    @pytest.mark.asyncio
+    async def test_market_buy_returns_order_id_from_odno(self, broker_factory) -> None:
+        async with httpx.AsyncClient(base_url=MOCK_BASE) as c:
+            with respx.mock(base_url=MOCK_BASE) as router:
+                router.post("/oauth2/tokenP").respond(
+                    200, json={"access_token": "tok", "expires_in": 86400}
+                )
+                route = router.post("/uapi/domestic-stock/v1/trading/order-cash").respond(
+                    200,
+                    json={
+                        "rt_cd": "0",
+                        "msg_cd": "OK",
+                        "msg1": "",
+                        "output": {"KRX_FWDG_ORD_ORGNO": "00950", "ODNO": "0000123456"},
+                    },
+                )
+                broker = broker_factory(c)
+                oid = await broker.place_order(
+                    Symbol("005930"), Side.BUY, OrderKind.MARKET, Decimal("1")
+                )
+                assert oid == "0000123456"
+                body = json.loads(route.calls[0].request.content)
+                assert body["PDNO"] == "005930"
+                assert body["ORD_DVSN"] == "01"
+                assert body["ORD_QTY"] == "1"
+                assert body["ORD_UNPR"] == "0"
+                assert body["EXCG_ID_DVSN_CD"] == "KRX"
+
+    @pytest.mark.asyncio
+    async def test_limit_sell_sends_price_and_sll_type(self, broker_factory) -> None:
+        async with httpx.AsyncClient(base_url=MOCK_BASE) as c:
+            with respx.mock(base_url=MOCK_BASE) as router:
+                router.post("/oauth2/tokenP").respond(
+                    200, json={"access_token": "tok", "expires_in": 86400}
+                )
+                route = router.post("/uapi/domestic-stock/v1/trading/order-cash").respond(
+                    200, json={"rt_cd": "0", "output": {"ODNO": "0000999"}}
+                )
+                broker = broker_factory(c)
+                await broker.place_order(
+                    Symbol("005930"),
+                    Side.SELL,
+                    OrderKind.LIMIT,
+                    Decimal("5"),
+                    Decimal("70000"),
+                )
+                body = json.loads(route.calls[0].request.content)
+                assert body["ORD_DVSN"] == "00"
+                assert body["ORD_UNPR"] == "70000"
+                assert body["SLL_TYPE"] == "01"
+
+    @pytest.mark.asyncio
+    async def test_market_with_price_rejected_locally(self, broker_factory) -> None:
+        async with httpx.AsyncClient(base_url=MOCK_BASE) as c:
+            broker = broker_factory(c)
+            with pytest.raises(ValueError, match="Market"):
+                await broker.place_order(
+                    Symbol("005930"),
+                    Side.BUY,
+                    OrderKind.MARKET,
+                    Decimal("1"),
+                    Decimal("70000"),
+                )
+
+    @pytest.mark.asyncio
+    async def test_limit_without_price_rejected_locally(self, broker_factory) -> None:
+        async with httpx.AsyncClient(base_url=MOCK_BASE) as c:
+            broker = broker_factory(c)
+            with pytest.raises(ValueError, match="Limit"):
+                await broker.place_order(
+                    Symbol("005930"), Side.BUY, OrderKind.LIMIT, Decimal("1")
+                )
+
+    @pytest.mark.asyncio
+    async def test_rt_cd_nonzero_raises_api_error(self, broker_factory) -> None:
+        async with httpx.AsyncClient(base_url=MOCK_BASE) as c:
+            with respx.mock(base_url=MOCK_BASE) as router:
+                router.post("/oauth2/tokenP").respond(
+                    200, json={"access_token": "tok", "expires_in": 86400}
+                )
+                router.post("/uapi/domestic-stock/v1/trading/order-cash").respond(
+                    200, json={"rt_cd": "1", "msg_cd": "EGW00666", "msg1": "rejected"}
+                )
+                broker = broker_factory(c)
+                with pytest.raises(KISApiError, match="EGW00666"):
+                    await broker.place_order(
+                        Symbol("005930"), Side.BUY, OrderKind.MARKET, Decimal("1")
+                    )
+
+    @pytest.mark.asyncio
+    async def test_missing_odno_raises(self, broker_factory) -> None:
+        async with httpx.AsyncClient(base_url=MOCK_BASE) as c:
+            with respx.mock(base_url=MOCK_BASE) as router:
+                router.post("/oauth2/tokenP").respond(
+                    200, json={"access_token": "tok", "expires_in": 86400}
+                )
+                router.post("/uapi/domestic-stock/v1/trading/order-cash").respond(
+                    200, json={"rt_cd": "0", "output": {}}
+                )
+                broker = broker_factory(c)
+                with pytest.raises(KISApiError, match="no ODNO"):
+                    await broker.place_order(
+                        Symbol("005930"), Side.BUY, OrderKind.MARKET, Decimal("1")
+                    )
+
+
+def _order_row(**overrides: str) -> dict[str, str]:
+    base = {
+        "odno": "0000123456",
+        "pdno": "005930",
+        "sll_buy_dvsn_cd": "02",
+        "ord_dvsn_cd": "01",
+        "ord_qty": "10",
+        "ord_unpr": "0",
+        "tot_ccld_qty": "0",
+        "avg_prvs": "0",
+        "cncl_yn": "N",
+        "rfus_yn": "N",
+    }
+    base.update(overrides)
+    return base
+
+
+class TestGetOrder:
+    @staticmethod
+    def _mock_ccld_response(rows: list[dict[str, str]]) -> dict[str, object]:
+        return {"rt_cd": "0", "msg_cd": "OK", "msg1": "", "output1": rows, "output2": {}}
+
+    @pytest.mark.asyncio
+    async def test_pending_when_no_fills(self, broker_factory) -> None:
+        async with httpx.AsyncClient(base_url=MOCK_BASE) as c:
+            with respx.mock(base_url=MOCK_BASE) as router:
+                router.post("/oauth2/tokenP").respond(
+                    200, json={"access_token": "tok", "expires_in": 86400}
+                )
+                router.get("/uapi/domestic-stock/v1/trading/inquire-daily-ccld").respond(
+                    200, json=self._mock_ccld_response([_order_row()])
+                )
+                broker = broker_factory(c)
+                order = await broker.get_order(OrderId("0000123456"))
+                assert order.status is OrderStatus.PENDING
+                assert order.filled_quantity == Decimal("0")
+                assert order.avg_fill_price is None
+                assert order.side is Side.BUY
+                assert order.kind is OrderKind.MARKET
+
+    @pytest.mark.asyncio
+    async def test_partial_when_some_filled(self, broker_factory) -> None:
+        async with httpx.AsyncClient(base_url=MOCK_BASE) as c:
+            with respx.mock(base_url=MOCK_BASE) as router:
+                router.post("/oauth2/tokenP").respond(
+                    200, json={"access_token": "tok", "expires_in": 86400}
+                )
+                router.get("/uapi/domestic-stock/v1/trading/inquire-daily-ccld").respond(
+                    200,
+                    json=self._mock_ccld_response(
+                        [_order_row(tot_ccld_qty="3", avg_prvs="70000")]
+                    ),
+                )
+                broker = broker_factory(c)
+                order = await broker.get_order(OrderId("0000123456"))
+                assert order.status is OrderStatus.PARTIAL
+                assert order.filled_quantity == Decimal("3")
+                assert order.avg_fill_price == Decimal("70000")
+
+    @pytest.mark.asyncio
+    async def test_filled_when_all_filled(self, broker_factory) -> None:
+        async with httpx.AsyncClient(base_url=MOCK_BASE) as c:
+            with respx.mock(base_url=MOCK_BASE) as router:
+                router.post("/oauth2/tokenP").respond(
+                    200, json={"access_token": "tok", "expires_in": 86400}
+                )
+                router.get("/uapi/domestic-stock/v1/trading/inquire-daily-ccld").respond(
+                    200,
+                    json=self._mock_ccld_response(
+                        [_order_row(tot_ccld_qty="10", avg_prvs="71000")]
+                    ),
+                )
+                broker = broker_factory(c)
+                order = await broker.get_order(OrderId("0000123456"))
+                assert order.status is OrderStatus.FILLED
+                assert order.filled_quantity == Decimal("10")
+                assert order.avg_fill_price == Decimal("71000")
+
+    @pytest.mark.asyncio
+    async def test_cancelled_when_cncl_yn_y(self, broker_factory) -> None:
+        async with httpx.AsyncClient(base_url=MOCK_BASE) as c:
+            with respx.mock(base_url=MOCK_BASE) as router:
+                router.post("/oauth2/tokenP").respond(
+                    200, json={"access_token": "tok", "expires_in": 86400}
+                )
+                router.get("/uapi/domestic-stock/v1/trading/inquire-daily-ccld").respond(
+                    200, json=self._mock_ccld_response([_order_row(cncl_yn="Y")])
+                )
+                broker = broker_factory(c)
+                order = await broker.get_order(OrderId("0000123456"))
+                assert order.status is OrderStatus.CANCELLED
+
+    @pytest.mark.asyncio
+    async def test_rejected_when_rfus_yn_y(self, broker_factory) -> None:
+        async with httpx.AsyncClient(base_url=MOCK_BASE) as c:
+            with respx.mock(base_url=MOCK_BASE) as router:
+                router.post("/oauth2/tokenP").respond(
+                    200, json={"access_token": "tok", "expires_in": 86400}
+                )
+                router.get("/uapi/domestic-stock/v1/trading/inquire-daily-ccld").respond(
+                    200, json=self._mock_ccld_response([_order_row(rfus_yn="Y")])
+                )
+                broker = broker_factory(c)
+                order = await broker.get_order(OrderId("0000123456"))
+                assert order.status is OrderStatus.REJECTED
+
+    @pytest.mark.asyncio
+    async def test_unknown_odno_raises(self, broker_factory) -> None:
+        async with httpx.AsyncClient(base_url=MOCK_BASE) as c:
+            with respx.mock(base_url=MOCK_BASE) as router:
+                router.post("/oauth2/tokenP").respond(
+                    200, json={"access_token": "tok", "expires_in": 86400}
+                )
+                router.get("/uapi/domestic-stock/v1/trading/inquire-daily-ccld").respond(
+                    200, json=self._mock_ccld_response([])
+                )
+                broker = broker_factory(c)
+                with pytest.raises(KISApiError, match="not found"):
+                    await broker.get_order(OrderId("0000999999"))
