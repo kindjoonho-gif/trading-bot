@@ -137,3 +137,92 @@ async def test_mock_place_and_get_market_buy_samsung(
         assert any(p.symbol == "005930" for p in positions), (
             f"005930 missing from positions after buy: {[p.symbol for p in positions]}"
         )
+
+
+@_market_only
+@pytest.mark.asyncio
+async def test_mock_rebalance_execute_small_buy(
+    mock_settings: Settings, shared_cache: Path
+) -> None:
+    """Build a tiny one-row Plan (buy 1 share of 005930), execute it against
+    the mock broker via the executor + rate limiter, assert the outcome is
+    classified as filled and the position lands."""
+    from trader.domain.types import OrderKind
+    from trader.rebalance.execute import execute
+    from trader.rebalance.plan import Plan, PlanRow
+    from trader.rebalance.rate_limiter import TokenBucket
+
+    async with KISBroker(mock_settings, cache_dir=shared_cache) as broker:
+        await asyncio.sleep(_RATE_LIMIT_SLEEP)
+        quote = await broker.get_quote(Symbol("005930"))
+
+        row = PlanRow(
+            symbol=Symbol("005930"),
+            current_quantity=Decimal("0"),
+            current_weight=Decimal("0"),
+            target_weight=Decimal("0"),
+            drift=Decimal("0"),
+            raw_delta_won=Decimal("0"),
+            raw_delta_shares=Decimal("1"),
+            rounded_delta_shares=Decimal("1"),
+            side=Side.BUY,
+            kind=OrderKind.MARKET,
+            skipped_reason=None,
+        )
+        plan_obj = Plan(
+            rows=[row],
+            total_value=quote.last,
+            starting_cash=quote.last,
+            cash_residual=Decimal("0"),
+        )
+        bucket = TokenBucket(rate=2.0)
+
+        summary = await execute(plan_obj, broker, bucket, poll_interval=_RATE_LIMIT_SLEEP)
+        assert len(summary.filled) == 1
+        assert summary.filled[0].symbol == "005930"
+        assert summary.filled[0].filled_quantity == Decimal("1")
+
+
+@_market_only
+@pytest.mark.asyncio
+async def test_mock_rebalance_execute_forced_failure(
+    mock_settings: Settings, shared_cache: Path
+) -> None:
+    """Force a failure path: sell 99999 shares of a symbol we don't hold.
+    KIS should reject either at submit time or post-submit; either way the
+    summary classifies it in the rejected bucket."""
+    from trader.domain.types import OrderKind
+    from trader.rebalance.execute import execute
+    from trader.rebalance.plan import Plan, PlanRow
+    from trader.rebalance.rate_limiter import TokenBucket
+
+    async with KISBroker(mock_settings, cache_dir=shared_cache) as broker:
+        await asyncio.sleep(_RATE_LIMIT_SLEEP)
+        row = PlanRow(
+            symbol=Symbol("005930"),
+            current_quantity=Decimal("0"),
+            current_weight=Decimal("0"),
+            target_weight=Decimal("0"),
+            drift=Decimal("0"),
+            raw_delta_won=Decimal("0"),
+            raw_delta_shares=Decimal("-99999"),
+            rounded_delta_shares=Decimal("-99999"),
+            side=Side.SELL,
+            kind=OrderKind.MARKET,
+            skipped_reason=None,
+        )
+        plan_obj = Plan(
+            rows=[row],
+            total_value=Decimal("1"),
+            starting_cash=Decimal("0"),
+            cash_residual=Decimal("0"),
+        )
+        bucket = TokenBucket(rate=2.0)
+
+        summary = await execute(plan_obj, broker, bucket, poll_interval=_RATE_LIMIT_SLEEP)
+        assert len(summary.outcomes) == 1
+        o = summary.outcomes[0]
+        assert o.outcome in {"rejected", "errored"}, (
+            f"expected rejected or errored for impossible sell, got {o.outcome}: {o.reason}"
+        )
+        assert len(summary.filled) == 0

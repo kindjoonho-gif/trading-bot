@@ -12,8 +12,13 @@ from trader.domain.money import format_krw
 from trader.domain.types import Position, Quote, Symbol
 from trader.portfolio.loader import PortfolioLoadError
 from trader.portfolio.loader import load as load_portfolio
+from trader.rebalance.execute import RebalanceSummary, execute
 from trader.rebalance.plan import Plan, plan
-from ui._common import make_broker, render_sidebar, run_async
+from trader.rebalance.rate_limiter import TokenBucket
+from ui._common import is_live, make_broker, render_sidebar, run_async
+
+_RATE_PER_SEC_MOCK = 2.0
+_RATE_PER_SEC_REAL = 20.0
 
 st.set_page_config(page_title="Rebalance · Autotrader", layout="wide")
 render_sidebar()
@@ -117,3 +122,79 @@ else:
             f"{r.symbol} (drift {r.drift:.3%}, {r.skipped_reason})" for r in skipped_rows
         ]
         st.write(f"**Skipped ({len(skipped_rows)}):** " + ", ".join(parts))
+
+
+st.subheader("Execute")
+
+actionable_for_exec = [r for r in result.rows if not r.skipped]
+if not actionable_for_exec:
+    st.info("Nothing to execute — every row is skipped.")
+elif not is_live():
+    st.warning(
+        f"Dry-run — {len(actionable_for_exec)} order(s) NOT sent. "
+        "Enable LIVE Mode in the sidebar and re-load to submit for real."
+    )
+    df_dry = pd.DataFrame(
+        [
+            {
+                "Symbol": r.symbol,
+                "Side": r.side.value,
+                "Qty": int(r.order_quantity),
+            }
+            for r in actionable_for_exec
+        ]
+    )
+    st.dataframe(df_dry, hide_index=True)
+else:
+    st.error(
+        f"LIVE Mode is ON. Executing will submit {len(actionable_for_exec)} "
+        "real order(s) via KIS in parallel."
+    )
+    confirm_col, cancel_col = st.columns(2)
+    if confirm_col.button("Confirm execute", type="primary", key="rebalance_confirm"):
+        from trader.config.settings import get_settings
+
+        env = get_settings().KIS_ENV
+        rate = _RATE_PER_SEC_MOCK if env == "mock" else _RATE_PER_SEC_REAL
+
+        async def _do_execute(p: Plan) -> RebalanceSummary:
+            async with make_broker() as b:
+                bucket = TokenBucket(rate=rate)
+                return await execute(p, b, bucket)
+
+        try:
+            with st.spinner("Submitting orders in parallel + polling to terminal..."):
+                summary = run_async(_do_execute(result))
+        except (KISAuthError, KISApiError) as e:
+            st.error(f"KIS error: {e}")
+            st.stop()
+
+        st.subheader("Summary")
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Filled", len(summary.filled))
+        c2.metric("Rejected", len(summary.rejected))
+        c3.metric("Errored", len(summary.errored))
+        st.dataframe(
+            pd.DataFrame(
+                [
+                    {
+                        "Symbol": o.symbol,
+                        "Side": o.side.value,
+                        "Qty": int(o.quantity),
+                        "Outcome": o.outcome,
+                        "OrderId": o.order_id or "",
+                        "Filled qty": int(o.filled_quantity),
+                        "Avg fill ₩": (
+                            f"{o.avg_fill_price:,}" if o.avg_fill_price is not None else ""
+                        ),
+                        "Reason": o.reason or "",
+                    }
+                    for o in summary.outcomes
+                ]
+            ),
+            hide_index=True,
+            use_container_width=True,
+        )
+        st.info("No retry on rejection. No auto-rollback. Resolve any failures manually.")
+    if cancel_col.button("Cancel", key="rebalance_cancel"):
+        st.rerun()
