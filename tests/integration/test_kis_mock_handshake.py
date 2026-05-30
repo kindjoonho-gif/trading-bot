@@ -10,13 +10,13 @@ from __future__ import annotations
 
 import asyncio
 import os
-from datetime import datetime, time, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 
 import pytest
 
-from trader.brokers.kis import KISBroker
+from trader.brokers.kis import KISApiError, KISBroker
 from trader.config.settings import Settings
 from trader.domain.types import OrderKind, OrderStatus, Side, Symbol
 
@@ -226,3 +226,40 @@ async def test_mock_rebalance_execute_forced_failure(
             f"expected rejected or errored for impossible sell, got {o.outcome}: {o.reason}"
         )
         assert len(summary.filled) == 0
+
+
+@pytest.mark.asyncio
+async def test_mock_list_fills_open_window(
+    mock_settings: Settings, shared_cache: Path
+) -> None:
+    """Fetch fills for the last 7 days against KIS mock — body may be empty."""
+    await asyncio.sleep(_RATE_LIMIT_SLEEP)
+    async with KISBroker(mock_settings, cache_dir=shared_cache) as broker:
+        end = date.today()
+        start = end - timedelta(days=7)
+        fills = await broker.list_fills(start, end)
+        assert isinstance(fills, list)
+        for f in fills:
+            assert f.symbol
+            assert f.quantity > 0
+            assert f.fill_price > 0
+
+
+@pytest.mark.asyncio
+async def test_mock_realized_pnl_either_succeeds_or_rejects_cleanly(
+    mock_settings: Settings, shared_cache: Path
+) -> None:
+    """KIS mock typically rejects TTTC8715R; if it does, the broker raises
+    KISApiError instead of crashing in an opaque way. If mock happens to
+    support it now, the call returns a typed summary either way."""
+    await asyncio.sleep(_RATE_LIMIT_SLEEP)
+    async with KISBroker(mock_settings, cache_dir=shared_cache) as broker:
+        end = date.today()
+        start = end - timedelta(days=30)
+        try:
+            summary = await broker.realized_pnl(start, end)
+            assert summary.total_realized_pnl is not None
+        except KISApiError as e:
+            assert "EGW" in str(e) or "TR" in str(e) or "지원" in str(e), (
+                f"unexpected error shape: {e}"
+            )
