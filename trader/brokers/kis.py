@@ -16,6 +16,7 @@ from trader.domain.types import Order, OrderId, OrderKind, Position, Quote, Side
 
 TR_ID_BALANCE_MOCK = "VTTC8434R"
 TR_ID_BALANCE_REAL = "TTTC8434R"
+TR_ID_QUOTE = "FHKST01010200"
 
 _TOKEN_REFRESH_BUFFER_SECONDS = 60
 
@@ -165,7 +166,7 @@ class KISBroker(Broker):
 
     # ---- Endpoints ----
 
-    async def get_cash(self) -> Decimal:
+    async def _balance_params(self) -> tuple[str, str, dict[str, str]]:
         cano, prdt = self._settings.account
         tr_id = TR_ID_BALANCE_MOCK if self._settings.KIS_ENV == "mock" else TR_ID_BALANCE_REAL
         params = {
@@ -181,7 +182,10 @@ class KISBroker(Broker):
             "CTX_AREA_FK100": "",
             "CTX_AREA_NK100": "",
         }
-        url = "/uapi/domestic-stock/v1/trading/inquire-balance"
+        return "/uapi/domestic-stock/v1/trading/inquire-balance", tr_id, params
+
+    async def _request_balance(self) -> dict[str, Any]:
+        url, tr_id, params = await self._balance_params()
         resp = await self._client.get(url, headers=await self._headers(tr_id), params=params)
         if resp.status_code == 401:
             self._token = None
@@ -189,21 +193,61 @@ class KISBroker(Broker):
             resp = await self._client.get(url, headers=await self._headers(tr_id), params=params)
         if resp.status_code != 200:
             raise KISApiError(str(resp.status_code), resp.text)
-        data = resp.json()
+        data: dict[str, Any] = resp.json()
         if data.get("rt_cd") != "0":
             raise KISApiError(data.get("msg_cd", "?"), data.get("msg1", "unknown error"))
+        return data
+
+    async def get_cash(self) -> Decimal:
+        data = await self._request_balance()
         output2 = data.get("output2") or []
         if not output2:
             return Decimal("0")
         return to_decimal(output2[0].get("dnca_tot_amt", "0"))
 
-    # ---- Phase A slices to come ----
-
     async def get_positions(self) -> list[Position]:
-        raise NotImplementedError("lands in slice I2 (#4)")
+        data = await self._request_balance()
+        output1 = data.get("output1") or []
+        positions: list[Position] = []
+        for row in output1:
+            qty = to_decimal(row.get("hldg_qty", "0"))
+            if qty == 0:
+                continue
+            positions.append(
+                Position(
+                    symbol=Symbol(str(row["pdno"])),
+                    quantity=qty,
+                    avg_cost=to_decimal(row.get("pchs_avg_pric", "0")),
+                )
+            )
+        return positions
 
     async def get_quote(self, symbol: Symbol) -> Quote:
-        raise NotImplementedError("lands in slice I2 (#4)")
+        url = "/uapi/domestic-stock/v1/quotations/inquire-asking-price-exp-ccn"
+        params = {"FID_COND_MRKT_DIV_CODE": "J", "FID_INPUT_ISCD": str(symbol)}
+        resp = await self._client.get(
+            url, headers=await self._headers(TR_ID_QUOTE), params=params
+        )
+        if resp.status_code == 401:
+            self._token = None
+            self._cache.clear()
+            resp = await self._client.get(
+                url, headers=await self._headers(TR_ID_QUOTE), params=params
+            )
+        if resp.status_code != 200:
+            raise KISApiError(str(resp.status_code), resp.text)
+        data = resp.json()
+        if data.get("rt_cd") != "0":
+            raise KISApiError(data.get("msg_cd", "?"), data.get("msg1", "unknown error"))
+        output1 = data.get("output1") or {}
+        output2 = data.get("output2") or {}
+        last_raw = output2.get("stck_prpr") or output2.get("antc_cnpr") or "0"
+        return Quote(
+            symbol=symbol,
+            bid=to_decimal(output1.get("bidp1", "0")),
+            ask=to_decimal(output1.get("askp1", "0")),
+            last=to_decimal(last_raw),
+        )
 
     async def place_order(
         self,
