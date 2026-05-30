@@ -12,11 +12,31 @@ from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_fi
 from trader.brokers.base import Broker
 from trader.config.settings import Settings
 from trader.domain.money import to_decimal
-from trader.domain.types import Order, OrderId, OrderKind, Position, Quote, Side, Symbol
+from trader.domain.types import (
+    Order,
+    OrderId,
+    OrderKind,
+    OrderStatus,
+    Position,
+    Quote,
+    Side,
+    Symbol,
+)
 
 TR_ID_BALANCE_MOCK = "VTTC8434R"
 TR_ID_BALANCE_REAL = "TTTC8434R"
 TR_ID_QUOTE = "FHKST01010200"
+
+TR_ID_ORDER_BUY_MOCK = "VTTC0012U"
+TR_ID_ORDER_SELL_MOCK = "VTTC0011U"
+TR_ID_ORDER_BUY_REAL = "TTTC0012U"
+TR_ID_ORDER_SELL_REAL = "TTTC0011U"
+
+TR_ID_INQUIRE_ORDERS_MOCK = "VTTC0081R"
+TR_ID_INQUIRE_ORDERS_REAL = "TTTC0081R"
+
+_ORD_DVSN_LIMIT = "00"
+_ORD_DVSN_MARKET = "01"
 
 _TOKEN_REFRESH_BUFFER_SECONDS = 60
 
@@ -257,10 +277,129 @@ class KISBroker(Broker):
         quantity: Decimal,
         price: Decimal | None = None,
     ) -> OrderId:
-        raise NotImplementedError("lands in slice I3 (#5)")
+        if kind is OrderKind.MARKET and price is not None:
+            raise ValueError("Market order must not have a price")
+        if kind is OrderKind.LIMIT and price is None:
+            raise ValueError("Limit order requires a price")
+        cano, prdt = self._settings.account
+        is_mock = self._settings.KIS_ENV == "mock"
+        if side is Side.BUY:
+            tr_id = TR_ID_ORDER_BUY_MOCK if is_mock else TR_ID_ORDER_BUY_REAL
+        else:
+            tr_id = TR_ID_ORDER_SELL_MOCK if is_mock else TR_ID_ORDER_SELL_REAL
+        ord_dvsn = _ORD_DVSN_MARKET if kind is OrderKind.MARKET else _ORD_DVSN_LIMIT
+        body = {
+            "CANO": cano,
+            "ACNT_PRDT_CD": prdt,
+            "PDNO": str(symbol),
+            "ORD_DVSN": ord_dvsn,
+            "ORD_QTY": str(int(quantity)),
+            "ORD_UNPR": "0" if kind is OrderKind.MARKET else str(price),
+            "EXCG_ID_DVSN_CD": "KRX",
+            "SLL_TYPE": "01" if side is Side.SELL else "",
+            "CNDT_PRIC": "",
+        }
+        url = "/uapi/domestic-stock/v1/trading/order-cash"
+        resp = await self._client.post(url, headers=await self._headers(tr_id), json=body)
+        if resp.status_code == 401:
+            self._token = None
+            self._cache.clear()
+            resp = await self._client.post(url, headers=await self._headers(tr_id), json=body)
+        if resp.status_code != 200:
+            raise KISApiError(str(resp.status_code), resp.text)
+        data = resp.json()
+        if data.get("rt_cd") != "0":
+            raise KISApiError(data.get("msg_cd", "?"), data.get("msg1", "unknown error"))
+        output = data.get("output") or {}
+        odno = output.get("ODNO") or output.get("odno")
+        if not odno:
+            raise KISApiError("?", f"no ODNO in order response: {data!r}")
+        return OrderId(str(odno))
 
     async def get_order(self, order_id: OrderId) -> Order:
-        raise NotImplementedError("lands in slice I3 (#5)")
+        cano, prdt = self._settings.account
+        tr_id = (
+            TR_ID_INQUIRE_ORDERS_MOCK
+            if self._settings.KIS_ENV == "mock"
+            else TR_ID_INQUIRE_ORDERS_REAL
+        )
+        today = datetime.now(timezone(timedelta(hours=9))).strftime("%Y%m%d")
+        params = {
+            "CANO": cano,
+            "ACNT_PRDT_CD": prdt,
+            "INQR_STRT_DT": today,
+            "INQR_END_DT": today,
+            "SLL_BUY_DVSN_CD": "00",
+            "PDNO": "",
+            "CCLD_DVSN": "00",
+            "INQR_DVSN": "00",
+            "INQR_DVSN_3": "00",
+            "ORD_GNO_BRNO": "",
+            "ODNO": str(order_id),
+            "INQR_DVSN_1": "",
+            "CTX_AREA_FK100": "",
+            "CTX_AREA_NK100": "",
+            "EXCG_ID_DVSN_CD": "KRX",
+        }
+        url = "/uapi/domestic-stock/v1/trading/inquire-daily-ccld"
+        resp = await self._client.get(url, headers=await self._headers(tr_id), params=params)
+        if resp.status_code == 401:
+            self._token = None
+            self._cache.clear()
+            resp = await self._client.get(url, headers=await self._headers(tr_id), params=params)
+        if resp.status_code != 200:
+            raise KISApiError(str(resp.status_code), resp.text)
+        data = resp.json()
+        if data.get("rt_cd") != "0":
+            raise KISApiError(data.get("msg_cd", "?"), data.get("msg1", "unknown error"))
+        rows = data.get("output1") or []
+        matched = [r for r in rows if str(r.get("odno", "")) == str(order_id)]
+        if not matched:
+            raise KISApiError("?", f"order {order_id} not found in today's orders")
+        return _row_to_order(matched[0])
+
+    async def list_open_orders(self) -> list[Order]:
+        raise NotImplementedError("lands in slice I4 (#7)")
+
+    async def cancel_order(self, order_id: OrderId) -> None:
+        raise NotImplementedError("lands in slice I4 (#7)")
+
+
+def _row_to_order(row: dict[str, Any]) -> Order:
+    ord_qty = to_decimal(row.get("ord_qty", "0"))
+    tot_ccld_qty = to_decimal(row.get("tot_ccld_qty", "0"))
+    cncl_yn = (row.get("cncl_yn") or "N").upper()
+    rfus_yn = (row.get("rfus_yn") or row.get("rjct_yn") or "N").upper()
+    if rfus_yn == "Y":
+        status = OrderStatus.REJECTED
+    elif cncl_yn == "Y":
+        status = OrderStatus.CANCELLED
+    elif tot_ccld_qty >= ord_qty and ord_qty > 0:
+        status = OrderStatus.FILLED
+    elif tot_ccld_qty > 0:
+        status = OrderStatus.PARTIAL
+    else:
+        status = OrderStatus.PENDING
+    side = Side.SELL if str(row.get("sll_buy_dvsn_cd", "")) == "01" else Side.BUY
+    kind = (
+        OrderKind.MARKET
+        if str(row.get("ord_dvsn_cd", row.get("ord_dvsn", ""))) == _ORD_DVSN_MARKET
+        else OrderKind.LIMIT
+    )
+    ord_unpr = to_decimal(row.get("ord_unpr", "0"))
+    avg_fill_raw = row.get("avg_prvs") or row.get("avg_prvs_pric") or "0"
+    avg_fill = to_decimal(avg_fill_raw)
+    return Order(
+        order_id=OrderId(str(row["odno"])),
+        symbol=Symbol(str(row["pdno"])),
+        side=side,
+        kind=kind,
+        quantity=ord_qty,
+        price=ord_unpr if kind is OrderKind.LIMIT else None,
+        status=status,
+        filled_quantity=tot_ccld_qty,
+        avg_fill_price=avg_fill if tot_ccld_qty > 0 else None,
+    )
 
     async def list_open_orders(self) -> list[Order]:
         raise NotImplementedError("lands in slice I4 (#7)")
