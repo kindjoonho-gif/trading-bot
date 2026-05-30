@@ -40,6 +40,9 @@ TR_ID_INQUIRE_ORDERS_REAL = "TTTC0081R"
 
 TR_ID_PERIOD_TRADE_PROFIT = "TTTC8715R"
 
+TR_ID_RVSECNCL_MOCK = "VTTC0013U"
+TR_ID_RVSECNCL_REAL = "TTTC0013U"
+
 _ORD_DVSN_LIMIT = "00"
 _ORD_DVSN_MARKET = "01"
 
@@ -364,10 +367,118 @@ class KISBroker(Broker):
         return _row_to_order(matched[0])
 
     async def list_open_orders(self) -> list[Order]:
-        raise NotImplementedError("lands in slice I4 (#7)")
+        """Return today's unfilled orders (PENDING + PARTIAL).
+
+        Uses inquire-daily-ccld with CCLD_DVSN='02' (unfilled) — mock-supported,
+        today-only window. Multi-day stale orders are out of scope.
+        """
+        rows = await self._fetch_orders_for_today(ccld_dvsn="02")
+        return [
+            _row_to_order(r)
+            for r in rows
+            if (r.get("cncl_yn") or "N").upper() != "Y"
+            and (r.get("rfus_yn") or r.get("rjct_yn") or "N").upper() != "Y"
+        ]
 
     async def cancel_order(self, order_id: OrderId) -> None:
-        raise NotImplementedError("lands in slice I4 (#7)")
+        """Look up the order in today's open list, then submit a full-quantity
+        cancel via order-rvsecncl. Already-filled or unknown ID surfaces as
+        KISApiError 'not found in open orders'.
+        """
+        rows = await self._fetch_orders_for_today(ccld_dvsn="02", odno=str(order_id))
+        matched = [r for r in rows if str(r.get("odno", "")) == str(order_id)]
+        if not matched:
+            raise KISApiError(
+                "?", f"order {order_id} not in open orders (already filled or unknown)"
+            )
+        row = matched[0]
+        cano, prdt = self._settings.account
+        tr_id = (
+            TR_ID_RVSECNCL_MOCK if self._settings.KIS_ENV == "mock" else TR_ID_RVSECNCL_REAL
+        )
+        body = {
+            "CANO": cano,
+            "ACNT_PRDT_CD": prdt,
+            "KRX_FWDG_ORD_ORGNO": str(row.get("ord_gno_brno", "")),
+            "ORGN_ODNO": str(order_id),
+            "ORD_DVSN": str(row.get("ord_dvsn_cd", _ORD_DVSN_LIMIT)),
+            "RVSE_CNCL_DVSN_CD": "02",
+            "ORD_QTY": str(int(to_decimal(row.get("ord_qty", "0")))),
+            "ORD_UNPR": "0",
+            "QTY_ALL_ORD_YN": "Y",
+            "EXCG_ID_DVSN_CD": "KRX",
+        }
+        url = "/uapi/domestic-stock/v1/trading/order-rvsecncl"
+        resp = await self._client.post(url, headers=await self._headers(tr_id), json=body)
+        if resp.status_code == 401:
+            self._token = None
+            self._cache.clear()
+            resp = await self._client.post(
+                url, headers=await self._headers(tr_id), json=body
+            )
+        if resp.status_code != 200:
+            raise KISApiError(str(resp.status_code), resp.text)
+        data = resp.json()
+        if data.get("rt_cd") != "0":
+            raise KISApiError(data.get("msg_cd", "?"), data.get("msg1", "unknown error"))
+
+    async def _fetch_orders_for_today(
+        self, *, ccld_dvsn: str, odno: str = ""
+    ) -> list[dict[str, Any]]:
+        """Shared helper: paginated GET inquire-daily-ccld for today only."""
+        cano, prdt = self._settings.account
+        tr_id = (
+            TR_ID_INQUIRE_ORDERS_MOCK
+            if self._settings.KIS_ENV == "mock"
+            else TR_ID_INQUIRE_ORDERS_REAL
+        )
+        today = datetime.now(timezone(timedelta(hours=9))).strftime("%Y%m%d")
+        url = "/uapi/domestic-stock/v1/trading/inquire-daily-ccld"
+        out: list[dict[str, Any]] = []
+        fk100 = ""
+        nk100 = ""
+        tr_cont = ""
+        for _ in range(10):
+            params = {
+                "CANO": cano,
+                "ACNT_PRDT_CD": prdt,
+                "INQR_STRT_DT": today,
+                "INQR_END_DT": today,
+                "SLL_BUY_DVSN_CD": "00",
+                "PDNO": "",
+                "CCLD_DVSN": ccld_dvsn,
+                "INQR_DVSN": "00",
+                "INQR_DVSN_3": "00",
+                "ORD_GNO_BRNO": "",
+                "ODNO": odno,
+                "INQR_DVSN_1": "",
+                "CTX_AREA_FK100": fk100,
+                "CTX_AREA_NK100": nk100,
+                "EXCG_ID_DVSN_CD": "KRX",
+            }
+            headers = await self._headers(tr_id)
+            if tr_cont:
+                headers["tr_cont"] = tr_cont
+            resp = await self._client.get(url, headers=headers, params=params)
+            if resp.status_code == 401:
+                self._token = None
+                self._cache.clear()
+                resp = await self._client.get(
+                    url, headers=await self._headers(tr_id), params=params
+                )
+            if resp.status_code != 200:
+                raise KISApiError(str(resp.status_code), resp.text)
+            data = resp.json()
+            if data.get("rt_cd") != "0":
+                raise KISApiError(data.get("msg_cd", "?"), data.get("msg1", "unknown error"))
+            out.extend(data.get("output1") or [])
+            next_cont = resp.headers.get("tr_cont", "").upper()
+            if next_cont not in {"M", "F"}:
+                break
+            tr_cont = "N"
+            fk100 = data.get("ctx_area_fk100", "") or ""
+            nk100 = data.get("ctx_area_nk100", "") or ""
+        return out
 
     async def list_fills(self, start_date: date, end_date: date) -> list[Fill]:
         """Return all filled-order records in [start_date, end_date], following
