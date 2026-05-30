@@ -55,3 +55,9 @@ class Order(_Model):
     status: OrderStatus
     filled_quantity: Decimal
     avg_fill_price: Decimal | None
+
+
+class Portfolio(_Model):
+    broker: str
+    holdings: dict[Symbol, Decimal]
+    drift_tolerance: Decimal
