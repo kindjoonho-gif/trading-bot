@@ -11,6 +11,7 @@ import respx
 
 from trader.brokers.kis import KISApiError, KISAuthError, KISBroker, _TokenCache
 from trader.config.settings import Settings
+from trader.domain.types import Symbol
 
 MOCK_BASE = "https://openapivts.koreainvestment.com:29443"
 
@@ -231,3 +232,191 @@ class TestGetCash:
                 assert balance_route.call_count == 2
                 assert token_route.call_count == 2
                 assert (tmp_path / "kis_token_mock.json").exists()
+
+
+class TestGetPositions:
+    @pytest.mark.asyncio
+    async def test_parses_output1_rows(self, broker_factory) -> None:
+        async with httpx.AsyncClient(base_url=MOCK_BASE) as c:
+            with respx.mock(base_url=MOCK_BASE) as router:
+                router.post("/oauth2/tokenP").respond(
+                    200, json={"access_token": "tok", "expires_in": 86400}
+                )
+                router.get("/uapi/domestic-stock/v1/trading/inquire-balance").respond(
+                    200,
+                    json={
+                        "rt_cd": "0",
+                        "msg_cd": "OK",
+                        "msg1": "",
+                        "output1": [
+                            {"pdno": "005930", "hldg_qty": "10", "pchs_avg_pric": "70000"},
+                            {"pdno": "000660", "hldg_qty": "5", "pchs_avg_pric": "120000.5"},
+                        ],
+                        "output2": [{"dnca_tot_amt": "0"}],
+                    },
+                )
+                broker = broker_factory(c)
+                positions = await broker.get_positions()
+                assert len(positions) == 2
+                assert positions[0].symbol == "005930"
+                assert positions[0].quantity == Decimal("10")
+                assert positions[0].avg_cost == Decimal("70000")
+                assert positions[1].symbol == "000660"
+                assert positions[1].quantity == Decimal("5")
+                assert positions[1].avg_cost == Decimal("120000.5")
+
+    @pytest.mark.asyncio
+    async def test_skips_zero_quantity_rows(self, broker_factory) -> None:
+        async with httpx.AsyncClient(base_url=MOCK_BASE) as c:
+            with respx.mock(base_url=MOCK_BASE) as router:
+                router.post("/oauth2/tokenP").respond(
+                    200, json={"access_token": "tok", "expires_in": 86400}
+                )
+                router.get("/uapi/domestic-stock/v1/trading/inquire-balance").respond(
+                    200,
+                    json={
+                        "rt_cd": "0",
+                        "msg_cd": "OK",
+                        "msg1": "",
+                        "output1": [
+                            {"pdno": "005930", "hldg_qty": "10", "pchs_avg_pric": "70000"},
+                            {"pdno": "000660", "hldg_qty": "0", "pchs_avg_pric": "0"},
+                        ],
+                        "output2": [{"dnca_tot_amt": "0"}],
+                    },
+                )
+                broker = broker_factory(c)
+                positions = await broker.get_positions()
+                assert len(positions) == 1
+                assert positions[0].symbol == "005930"
+
+    @pytest.mark.asyncio
+    async def test_empty_output1_returns_empty_list(self, broker_factory) -> None:
+        async with httpx.AsyncClient(base_url=MOCK_BASE) as c:
+            with respx.mock(base_url=MOCK_BASE) as router:
+                router.post("/oauth2/tokenP").respond(
+                    200, json={"access_token": "tok", "expires_in": 86400}
+                )
+                router.get("/uapi/domestic-stock/v1/trading/inquire-balance").respond(
+                    200,
+                    json={
+                        "rt_cd": "0",
+                        "msg_cd": "OK",
+                        "msg1": "",
+                        "output1": [],
+                        "output2": [{"dnca_tot_amt": "0"}],
+                    },
+                )
+                broker = broker_factory(c)
+                assert await broker.get_positions() == []
+
+    @pytest.mark.asyncio
+    async def test_rt_cd_nonzero_raises_api_error(self, broker_factory) -> None:
+        async with httpx.AsyncClient(base_url=MOCK_BASE) as c:
+            with respx.mock(base_url=MOCK_BASE) as router:
+                router.post("/oauth2/tokenP").respond(
+                    200, json={"access_token": "tok", "expires_in": 86400}
+                )
+                router.get("/uapi/domestic-stock/v1/trading/inquire-balance").respond(
+                    200,
+                    json={"rt_cd": "1", "msg_cd": "EGW00999", "msg1": "boom"},
+                )
+                broker = broker_factory(c)
+                with pytest.raises(KISApiError, match="EGW00999"):
+                    await broker.get_positions()
+
+
+class TestGetQuote:
+    @pytest.mark.asyncio
+    async def test_parses_bid_ask_last_from_output1_output2(self, broker_factory) -> None:
+        async with httpx.AsyncClient(base_url=MOCK_BASE) as c:
+            with respx.mock(base_url=MOCK_BASE) as router:
+                router.post("/oauth2/tokenP").respond(
+                    200, json={"access_token": "tok", "expires_in": 86400}
+                )
+                router.get(
+                    "/uapi/domestic-stock/v1/quotations/inquire-asking-price-exp-ccn"
+                ).respond(
+                    200,
+                    json={
+                        "rt_cd": "0",
+                        "msg_cd": "OK",
+                        "msg1": "",
+                        "output1": {"bidp1": "69900", "askp1": "70000"},
+                        "output2": {"stck_prpr": "69950"},
+                    },
+                )
+                broker = broker_factory(c)
+                q = await broker.get_quote(Symbol("005930"))
+                assert q.symbol == "005930"
+                assert q.bid == Decimal("69900")
+                assert q.ask == Decimal("70000")
+                assert q.last == Decimal("69950")
+
+    @pytest.mark.asyncio
+    async def test_falls_back_to_antc_cnpr_when_stck_prpr_missing(self, broker_factory) -> None:
+        async with httpx.AsyncClient(base_url=MOCK_BASE) as c:
+            with respx.mock(base_url=MOCK_BASE) as router:
+                router.post("/oauth2/tokenP").respond(
+                    200, json={"access_token": "tok", "expires_in": 86400}
+                )
+                router.get(
+                    "/uapi/domestic-stock/v1/quotations/inquire-asking-price-exp-ccn"
+                ).respond(
+                    200,
+                    json={
+                        "rt_cd": "0",
+                        "output1": {"bidp1": "100", "askp1": "101"},
+                        "output2": {"antc_cnpr": "100"},
+                    },
+                )
+                broker = broker_factory(c)
+                q = await broker.get_quote(Symbol("005930"))
+                assert q.last == Decimal("100")
+
+    @pytest.mark.asyncio
+    async def test_rt_cd_nonzero_raises_api_error(self, broker_factory) -> None:
+        async with httpx.AsyncClient(base_url=MOCK_BASE) as c:
+            with respx.mock(base_url=MOCK_BASE) as router:
+                router.post("/oauth2/tokenP").respond(
+                    200, json={"access_token": "tok", "expires_in": 86400}
+                )
+                router.get(
+                    "/uapi/domestic-stock/v1/quotations/inquire-asking-price-exp-ccn"
+                ).respond(
+                    200,
+                    json={"rt_cd": "1", "msg_cd": "EGW00777", "msg1": "bad symbol"},
+                )
+                broker = broker_factory(c)
+                with pytest.raises(KISApiError, match="EGW00777"):
+                    await broker.get_quote(Symbol("999999"))
+
+    @pytest.mark.asyncio
+    async def test_401_triggers_reauth_and_retry(self, tmp_path: Path) -> None:
+        async with httpx.AsyncClient(base_url=MOCK_BASE) as c:
+            with respx.mock(base_url=MOCK_BASE) as router:
+                router.post("/oauth2/tokenP").mock(
+                    side_effect=[
+                        httpx.Response(200, json={"access_token": "t1", "expires_in": 86400}),
+                        httpx.Response(200, json={"access_token": "t2", "expires_in": 86400}),
+                    ]
+                )
+                quote_route = router.get(
+                    "/uapi/domestic-stock/v1/quotations/inquire-asking-price-exp-ccn"
+                ).mock(
+                    side_effect=[
+                        httpx.Response(401, text="unauthorized"),
+                        httpx.Response(
+                            200,
+                            json={
+                                "rt_cd": "0",
+                                "output1": {"bidp1": "1", "askp1": "2"},
+                                "output2": {"stck_prpr": "2"},
+                            },
+                        ),
+                    ]
+                )
+                broker = KISBroker(make_settings(), cache_dir=tmp_path, http_client=c)
+                q = await broker.get_quote(Symbol("005930"))
+                assert q.last == Decimal("2")
+                assert quote_route.call_count == 2
