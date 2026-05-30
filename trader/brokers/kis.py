@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -13,12 +13,15 @@ from trader.brokers.base import Broker
 from trader.config.settings import Settings
 from trader.domain.money import to_decimal
 from trader.domain.types import (
+    Fill,
     Order,
     OrderId,
     OrderKind,
     OrderStatus,
     Position,
     Quote,
+    RealizedPnLRow,
+    RealizedPnLSummary,
     Side,
     Symbol,
 )
@@ -34,6 +37,8 @@ TR_ID_ORDER_SELL_REAL = "TTTC0011U"
 
 TR_ID_INQUIRE_ORDERS_MOCK = "VTTC0081R"
 TR_ID_INQUIRE_ORDERS_REAL = "TTTC0081R"
+
+TR_ID_PERIOD_TRADE_PROFIT = "TTTC8715R"
 
 _ORD_DVSN_LIMIT = "00"
 _ORD_DVSN_MARKET = "01"
@@ -364,6 +369,129 @@ class KISBroker(Broker):
     async def cancel_order(self, order_id: OrderId) -> None:
         raise NotImplementedError("lands in slice I4 (#7)")
 
+    async def list_fills(self, start_date: date, end_date: date) -> list[Fill]:
+        """Return all filled-order records in [start_date, end_date], following
+        KIS pagination (tr_cont = M/F => next page, D/E => terminal).
+        """
+        cano, prdt = self._settings.account
+        tr_id = (
+            TR_ID_INQUIRE_ORDERS_MOCK
+            if self._settings.KIS_ENV == "mock"
+            else TR_ID_INQUIRE_ORDERS_REAL
+        )
+        url = "/uapi/domestic-stock/v1/trading/inquire-daily-ccld"
+        fills: list[Fill] = []
+        fk100 = ""
+        nk100 = ""
+        tr_cont = ""
+        for _ in range(10):
+            params = {
+                "CANO": cano,
+                "ACNT_PRDT_CD": prdt,
+                "INQR_STRT_DT": start_date.strftime("%Y%m%d"),
+                "INQR_END_DT": end_date.strftime("%Y%m%d"),
+                "SLL_BUY_DVSN_CD": "00",
+                "PDNO": "",
+                "CCLD_DVSN": "01",
+                "INQR_DVSN": "00",
+                "INQR_DVSN_3": "00",
+                "ORD_GNO_BRNO": "",
+                "ODNO": "",
+                "INQR_DVSN_1": "",
+                "CTX_AREA_FK100": fk100,
+                "CTX_AREA_NK100": nk100,
+                "EXCG_ID_DVSN_CD": "KRX",
+            }
+            headers = await self._headers(tr_id)
+            if tr_cont:
+                headers["tr_cont"] = tr_cont
+            resp = await self._client.get(url, headers=headers, params=params)
+            if resp.status_code == 401:
+                self._token = None
+                self._cache.clear()
+                resp = await self._client.get(
+                    url, headers=await self._headers(tr_id), params=params
+                )
+            if resp.status_code != 200:
+                raise KISApiError(str(resp.status_code), resp.text)
+            data = resp.json()
+            if data.get("rt_cd") != "0":
+                raise KISApiError(data.get("msg_cd", "?"), data.get("msg1", "unknown error"))
+            for row in data.get("output1") or []:
+                fills.append(_row_to_fill(row))
+            next_cont = resp.headers.get("tr_cont", "").upper()
+            if next_cont not in {"M", "F"}:
+                break
+            tr_cont = "N"
+            fk100 = data.get("ctx_area_fk100", "") or ""
+            nk100 = data.get("ctx_area_nk100", "") or ""
+        return fills
+
+    async def realized_pnl(
+        self, start_date: date, end_date: date
+    ) -> RealizedPnLSummary:
+        """Per-symbol realized P&L over [start_date, end_date] + grand total.
+
+        Uses TR TTTC8715R (inquire-period-trade-profit). KIS docs do not list a
+        mock TR; the call may raise KISApiError on KIS_ENV=mock.
+        """
+        cano, prdt = self._settings.account
+        url = "/uapi/domestic-stock/v1/trading/inquire-period-trade-profit"
+        rows: list[RealizedPnLRow] = []
+        total_buy = Decimal("0")
+        total_sell = Decimal("0")
+        total_pnl = Decimal("0")
+        fk100 = ""
+        nk100 = ""
+        tr_cont = ""
+        for _ in range(10):
+            params = {
+                "CANO": cano,
+                "ACNT_PRDT_CD": prdt,
+                "SORT_DVSN": "00",
+                "INQR_STRT_DT": start_date.strftime("%Y%m%d"),
+                "INQR_END_DT": end_date.strftime("%Y%m%d"),
+                "CBLC_DVSN": "00",
+                "PDNO": "",
+                "CTX_AREA_FK100": fk100,
+                "CTX_AREA_NK100": nk100,
+            }
+            headers = await self._headers(TR_ID_PERIOD_TRADE_PROFIT)
+            if tr_cont:
+                headers["tr_cont"] = tr_cont
+            resp = await self._client.get(url, headers=headers, params=params)
+            if resp.status_code == 401:
+                self._token = None
+                self._cache.clear()
+                resp = await self._client.get(
+                    url,
+                    headers=await self._headers(TR_ID_PERIOD_TRADE_PROFIT),
+                    params=params,
+                )
+            if resp.status_code != 200:
+                raise KISApiError(str(resp.status_code), resp.text)
+            data = resp.json()
+            if data.get("rt_cd") != "0":
+                raise KISApiError(data.get("msg_cd", "?"), data.get("msg1", "unknown error"))
+            for r in data.get("output1") or []:
+                rows.append(_row_to_pnl(r))
+            summary = data.get("output2") or {}
+            total_buy = to_decimal(summary.get("buy_amt_smtl", "0"))
+            total_sell = to_decimal(summary.get("sll_amt_smtl", "0"))
+            total_pnl = to_decimal(summary.get("rlzt_pfls_smtl", "0"))
+            next_cont = resp.headers.get("tr_cont", "").upper()
+            if next_cont not in {"M", "F"}:
+                break
+            tr_cont = "N"
+            fk100 = data.get("ctx_area_fk100", "") or ""
+            nk100 = data.get("ctx_area_nk100", "") or ""
+        return RealizedPnLSummary(
+            rows=tuple(rows),
+            total_buy_amount=total_buy,
+            total_sell_amount=total_sell,
+            total_realized_pnl=total_pnl,
+        )
+
 
 def _row_to_order(row: dict[str, Any]) -> Order:
     ord_qty = to_decimal(row.get("ord_qty", "0"))
@@ -401,8 +529,42 @@ def _row_to_order(row: dict[str, Any]) -> Order:
         avg_fill_price=avg_fill if tot_ccld_qty > 0 else None,
     )
 
-    async def list_open_orders(self) -> list[Order]:
-        raise NotImplementedError("lands in slice I4 (#7)")
 
-    async def cancel_order(self, order_id: OrderId) -> None:
-        raise NotImplementedError("lands in slice I4 (#7)")
+def _row_to_fill(row: dict[str, Any]) -> Fill:
+    side = Side.SELL if str(row.get("sll_buy_dvsn_cd", "")) == "01" else Side.BUY
+    qty = to_decimal(row.get("tot_ccld_qty") or row.get("ccld_qty") or "0")
+    price = to_decimal(
+        row.get("avg_prvs") or row.get("avg_prvs_pric") or row.get("ccld_unpr") or "0"
+    )
+    ord_dt = str(row.get("ord_dt", ""))
+    ord_tmd = str(row.get("ord_tmd") or row.get("ccld_tmd") or "")
+    if ord_dt and ord_tmd and len(ord_dt) == 8 and len(ord_tmd) >= 6:
+        fill_time = datetime.strptime(
+            f"{ord_dt}{ord_tmd[:6]}", "%Y%m%d%H%M%S"
+        ).replace(tzinfo=timezone(timedelta(hours=9)))
+    else:
+        fill_time = datetime.now(timezone(timedelta(hours=9)))
+    return Fill(
+        symbol=Symbol(str(row.get("pdno", ""))),
+        side=side,
+        quantity=qty,
+        fill_price=price,
+        fill_time=fill_time,
+        fees=Decimal("0"),
+    )
+
+
+def _row_to_pnl(row: dict[str, Any]) -> RealizedPnLRow:
+    qty = to_decimal(row.get("trad_qty") or row.get("sll_qty") or "0")
+    buy_amt = to_decimal(row.get("buy_amt") or "0")
+    sell_amt = to_decimal(row.get("sll_amt") or "0")
+    pnl = to_decimal(row.get("rlzt_pfls") or row.get("pfls_amt") or "0")
+    ret_pct = to_decimal(row.get("pfls_rt") or row.get("pftrt") or "0")
+    return RealizedPnLRow(
+        symbol=Symbol(str(row.get("pdno", ""))),
+        quantity=qty,
+        buy_amount=buy_amt,
+        sell_amount=sell_amt,
+        realized_pnl=pnl,
+        return_pct=ret_pct,
+    )

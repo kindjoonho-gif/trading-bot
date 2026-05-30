@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 from decimal import Decimal
 from enum import StrEnum
 from typing import NewType
@@ -61,3 +62,28 @@ class Portfolio(_Model):
     broker: str
     holdings: dict[Symbol, Decimal]
     drift_tolerance: Decimal
+
+
+class Fill(_Model):
+    symbol: Symbol
+    side: Side
+    quantity: Decimal
+    fill_price: Decimal
+    fill_time: datetime
+    fees: Decimal
+
+
+class RealizedPnLRow(_Model):
+    symbol: Symbol
+    quantity: Decimal
+    buy_amount: Decimal
+    sell_amount: Decimal
+    realized_pnl: Decimal
+    return_pct: Decimal
+
+
+class RealizedPnLSummary(_Model):
+    rows: tuple[RealizedPnLRow, ...]
+    total_buy_amount: Decimal
+    total_sell_amount: Decimal
+    total_realized_pnl: Decimal
