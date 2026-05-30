@@ -42,8 +42,14 @@ def get_cached_settings() -> Settings:
     return get_settings()
 
 
-@st.cache_resource(show_spinner=False)
-def get_cached_broker() -> KISBroker:
+def make_broker() -> KISBroker:
+    """Construct a fresh KISBroker (owning its own httpx.AsyncClient).
+
+    Not cached across reruns: a cached httpx client's asyncio primitives bind
+    to its creation-time event loop, but Streamlit reruns spawn fresh loops
+    via run_async, causing "bound to a different event loop" errors.
+    Always use inside `async with` so the client is closed cleanly.
+    """
     return KISBroker(get_cached_settings())
 
 
