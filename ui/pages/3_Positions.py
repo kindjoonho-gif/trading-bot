@@ -6,30 +6,34 @@ from decimal import Decimal
 import pandas as pd
 import streamlit as st
 
-from trader.brokers.kis import KISApiError, KISAuthError, KISBroker
+from trader.brokers.kis import KISApiError, KISAuthError
 from trader.domain.money import format_krw
 from trader.domain.types import Position, Quote, Symbol
 from trader.portfolio.view import build_rows
-from ui._common import get_cached_broker, render_sidebar, run_async
+from ui._common import make_broker, render_sidebar, run_async
 
 st.set_page_config(page_title="Positions · Autotrader", layout="wide")
 render_sidebar()
 
 st.title("Positions")
 
-broker = get_cached_broker()
+_RATE_LIMIT_SLEEP = 1.1
 
 
-async def _fetch(b: KISBroker) -> tuple[Decimal, list[Position], dict[Symbol, Quote]]:
-    cash, positions = await asyncio.gather(b.get_cash(), b.get_positions())
-    if not positions:
-        return cash, [], {}
-    quote_list = await asyncio.gather(*(b.get_quote(p.symbol) for p in positions))
-    return cash, positions, {q.symbol: q for q in quote_list}
+async def _fetch() -> tuple[Decimal, list[Position], dict[Symbol, Quote]]:
+    async with make_broker() as b:
+        cash = await b.get_cash()
+        await asyncio.sleep(_RATE_LIMIT_SLEEP)
+        positions = await b.get_positions()
+        quotes: dict[Symbol, Quote] = {}
+        for p in positions:
+            await asyncio.sleep(_RATE_LIMIT_SLEEP)
+            quotes[p.symbol] = await b.get_quote(p.symbol)
+        return cash, positions, quotes
 
 
 try:
-    cash, positions, quotes = run_async(_fetch(broker))
+    cash, positions, quotes = run_async(_fetch())
 except (KISAuthError, KISApiError) as e:
     st.error(f"KIS error: {e}")
     st.stop()

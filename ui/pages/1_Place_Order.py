@@ -5,17 +5,15 @@ from decimal import Decimal
 
 import streamlit as st
 
-from trader.brokers.kis import KISApiError, KISAuthError, KISBroker
+from trader.brokers.kis import KISApiError, KISAuthError
 from trader.domain.types import Order, OrderId, OrderKind, OrderStatus, Side
 from trader.orders.form import OrderFormError, OrderRequest, validate_order_form
-from ui._common import get_cached_broker, is_live, render_sidebar, run_async
+from ui._common import is_live, make_broker, render_sidebar, run_async
 
 st.set_page_config(page_title="Place Order · Autotrader", layout="wide")
 render_sidebar()
 
 st.title("Place Order")
-
-broker = get_cached_broker()
 
 _POLL_INTERVAL_S = 1.1
 _POLL_MAX = 10
@@ -32,18 +30,19 @@ def _envelope_table(req: OrderRequest) -> dict[str, str]:
     }
 
 
-async def _place_and_poll(b: KISBroker, req: OrderRequest) -> tuple[OrderId, Order | None]:
-    oid = await b.place_order(req.symbol, req.side, req.kind, req.quantity, req.price)
-    last: Order | None = None
-    for _ in range(_POLL_MAX):
-        try:
-            last = await b.get_order(oid)
-        except KISApiError:
-            last = None
-        if last is not None and last.status in _TERMINAL:
-            return oid, last
-        await asyncio.sleep(_POLL_INTERVAL_S)
-    return oid, last
+async def _place_and_poll(req: OrderRequest) -> tuple[OrderId, Order | None]:
+    async with make_broker() as b:
+        oid = await b.place_order(req.symbol, req.side, req.kind, req.quantity, req.price)
+        last: Order | None = None
+        for _ in range(_POLL_MAX):
+            try:
+                last = await b.get_order(oid)
+            except KISApiError:
+                last = None
+            if last is not None and last.status in _TERMINAL:
+                return oid, last
+            await asyncio.sleep(_POLL_INTERVAL_S)
+        return oid, last
 
 
 with st.form("place_order_form", clear_on_submit=False):
@@ -83,7 +82,7 @@ if req is not None:
         if confirm_col.button("Confirm submit", type="primary", key="confirm_submit"):
             try:
                 with st.spinner("Placing order + polling status..."):
-                    oid, order = run_async(_place_and_poll(broker, req))
+                    oid, order = run_async(_place_and_poll(req))
             except (KISAuthError, KISApiError) as e:
                 st.error(f"KIS error: {e}")
                 st.session_state.pop("pending_req", None)
