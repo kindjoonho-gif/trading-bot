@@ -175,8 +175,9 @@ async def test_mock_rebalance_execute_small_buy(
             starting_cash=quote.last,
             cash_residual=Decimal("0"),
         )
-        bucket = TokenBucket(rate=2.0)
+        bucket = TokenBucket(rate=1.0)
 
+        await asyncio.sleep(_RATE_LIMIT_SLEEP)
         summary = await execute(plan_obj, broker, bucket, poll_interval=_RATE_LIMIT_SLEEP)
         assert len(summary.filled) == 1
         assert summary.filled[0].symbol == "005930"
@@ -263,3 +264,43 @@ async def test_mock_realized_pnl_either_succeeds_or_rejects_cleanly(
             assert "EGW" in str(e) or "TR" in str(e) or "지원" in str(e), (
                 f"unexpected error shape: {e}"
             )
+
+
+@_market_only
+@pytest.mark.asyncio
+async def test_mock_list_then_cancel_limit_order(
+    mock_settings: Settings, shared_cache: Path
+) -> None:
+    """Place a deep-discount Limit buy on 005930 (will sit on the book),
+    confirm it appears in list_open_orders, cancel it, confirm it disappears.
+    Price floored near the KRX daily lower band (~-29%) so it cannot fill but
+    is not rejected as out-of-band (40270000)."""
+    async with KISBroker(mock_settings, cache_dir=shared_cache) as broker:
+        await asyncio.sleep(_RATE_LIMIT_SLEEP)
+        quote = await broker.get_quote(Symbol("005930"))
+        limit_price = (quote.last * Decimal("0.71") // Decimal("1000")) * Decimal("1000")
+
+        await asyncio.sleep(_RATE_LIMIT_SLEEP)
+        order_id = await broker.place_order(
+            Symbol("005930"),
+            Side.BUY,
+            OrderKind.LIMIT,
+            Decimal("1"),
+            limit_price,
+        )
+        assert order_id
+
+        await asyncio.sleep(_RATE_LIMIT_SLEEP)
+        before = await broker.list_open_orders()
+        assert any(o.order_id == order_id for o in before), (
+            f"placed limit {order_id} missing from open orders: {[o.order_id for o in before]}"
+        )
+
+        await asyncio.sleep(_RATE_LIMIT_SLEEP)
+        await broker.cancel_order(order_id)
+
+        await asyncio.sleep(_RATE_LIMIT_SLEEP)
+        after = await broker.list_open_orders()
+        assert not any(o.order_id == order_id for o in after), (
+            f"order {order_id} still in open list after cancel: {[o.order_id for o in after]}"
+        )
