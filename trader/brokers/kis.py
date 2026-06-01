@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from datetime import UTC, date, datetime, timedelta, timezone
 from decimal import Decimal
@@ -392,6 +393,7 @@ class KISBroker(Broker):
                 "?", f"order {order_id} not in open orders (already filled or unknown)"
             )
         row = matched[0]
+        await asyncio.sleep(1.1)
         cano, prdt = self._settings.account
         tr_id = (
             TR_ID_RVSECNCL_MOCK if self._settings.KIS_ENV == "mock" else TR_ID_RVSECNCL_REAL

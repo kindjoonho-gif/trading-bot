@@ -175,8 +175,9 @@ async def test_mock_rebalance_execute_small_buy(
             starting_cash=quote.last,
             cash_residual=Decimal("0"),
         )
-        bucket = TokenBucket(rate=2.0)
+        bucket = TokenBucket(rate=1.0)
 
+        await asyncio.sleep(_RATE_LIMIT_SLEEP)
         summary = await execute(plan_obj, broker, bucket, poll_interval=_RATE_LIMIT_SLEEP)
         assert len(summary.filled) == 1
         assert summary.filled[0].symbol == "005930"
@@ -270,17 +271,22 @@ async def test_mock_realized_pnl_either_succeeds_or_rejects_cleanly(
 async def test_mock_list_then_cancel_limit_order(
     mock_settings: Settings, shared_cache: Path
 ) -> None:
-    """Place a far-out-of-touch Limit buy on 005930 (will sit on the book),
+    """Place a deep-discount Limit buy on 005930 (will sit on the book),
     confirm it appears in list_open_orders, cancel it, confirm it disappears.
-    Far-OTM price (1 KRW) so it cannot fill during the test window."""
+    Price floored near the KRX daily lower band (~-29%) so it cannot fill but
+    is not rejected as out-of-band (40270000)."""
     async with KISBroker(mock_settings, cache_dir=shared_cache) as broker:
+        await asyncio.sleep(_RATE_LIMIT_SLEEP)
+        quote = await broker.get_quote(Symbol("005930"))
+        limit_price = (quote.last * Decimal("0.71") // Decimal("1000")) * Decimal("1000")
+
         await asyncio.sleep(_RATE_LIMIT_SLEEP)
         order_id = await broker.place_order(
             Symbol("005930"),
             Side.BUY,
             OrderKind.LIMIT,
             Decimal("1"),
-            Decimal("1"),
+            limit_price,
         )
         assert order_id
 
