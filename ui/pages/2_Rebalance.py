@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import os
+import sys
 from decimal import Decimal
 from pathlib import Path
 
@@ -15,7 +17,13 @@ from trader.portfolio.loader import load as load_portfolio
 from trader.rebalance.execute import RebalanceSummary, execute
 from trader.rebalance.plan import Plan, plan
 from trader.rebalance.rate_limiter import TokenBucket
-from ui._common import is_live, make_broker, render_sidebar, run_async
+from ui._common import (
+    get_cached_settings,
+    is_live,
+    make_broker,
+    render_sidebar,
+    run_async,
+)
 
 _RATE_PER_SEC_MOCK = 2.0
 _RATE_PER_SEC_REAL = 20.0
@@ -27,7 +35,18 @@ st.title("Rebalance")
 st.caption("Plan only — execution lands in I7 (#9).")
 
 default_path = str(Path("portfolios/example.yaml").resolve())
-yaml_path = st.text_input("Portfolio YAML path", value=default_path)
+path_col, edit_col = st.columns([5, 1])
+yaml_path = path_col.text_input("Portfolio YAML path", value=default_path)
+if edit_col.button("Edit file", help="Open the YAML in your OS default editor"):
+    try:
+        if sys.platform == "win32":
+            os.startfile(yaml_path)  # type: ignore[attr-defined]
+        elif sys.platform == "darwin":
+            os.system(f'open "{yaml_path}"')
+        else:
+            os.system(f'xdg-open "{yaml_path}"')
+    except OSError as e:
+        st.error(f"Could not open editor: {e}")
 
 _RATE_LIMIT_SLEEP = 1.1
 
@@ -152,9 +171,7 @@ else:
     )
     confirm_col, cancel_col = st.columns(2)
     if confirm_col.button("Confirm execute", type="primary", key="rebalance_confirm"):
-        from trader.config.settings import get_settings
-
-        env = get_settings().KIS_ENV
+        env = get_cached_settings().KIS_ENV
         rate = _RATE_PER_SEC_MOCK if env == "mock" else _RATE_PER_SEC_REAL
 
         async def _do_execute(p: Plan) -> RebalanceSummary:

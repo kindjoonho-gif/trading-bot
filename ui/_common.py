@@ -7,18 +7,28 @@ from typing import TypeVar
 import streamlit as st
 
 from trader.brokers.kis import KISBroker
-from trader.config.settings import Settings, get_settings
+from trader.config.settings import Settings, get_settings, reset_settings_cache
 from trader.history.store import HistoryStore
 from trader.history.sync import run_backfill
 
 T = TypeVar("T")
 
 LIVE_MODE_KEY = "live_mode"
+KIS_ENV_KEY = "kis_env"
 BACKFILL_DONE_KEY = "_backfill_done"
 
 
 def init_session() -> None:
-    """Seed session_state defaults once per session."""
+    """Seed session_state defaults once per session.
+
+    A browser refresh starts a new Streamlit session but keeps the same Python
+    process, which means `get_settings()`'s module cache still holds the .env
+    values read at boot. Reset that cache on the first init of each session so
+    a manual .env edit takes effect on refresh.
+    """
+    if KIS_ENV_KEY not in st.session_state:
+        reset_settings_cache()
+        st.session_state[KIS_ENV_KEY] = get_settings().KIS_ENV
     if LIVE_MODE_KEY not in st.session_state:
         st.session_state[LIVE_MODE_KEY] = False
 
@@ -28,19 +38,36 @@ def render_sidebar() -> None:
 
     Streamlit multipage quirk: widget state bound by `key=` is dropped when the
     user navigates to a different page, even though `st.session_state` survives.
-    Workaround: don't pass `key=`. Drive the widget purely via `value=` (read
-    from persistent storage) and write the return value back. Streamlit then
-    has no widget key to garbage-collect; we own the only state.
+    Workaround: don't pass `key=`. Drive each widget via `value=`/`index=` from
+    persistent storage and write the return value back. Streamlit then has no
+    widget key to garbage-collect; we own the only state.
     """
     init_session()
     with st.sidebar:
+        st.markdown("### Account")
+        current_env = st.session_state[KIS_ENV_KEY]
+        new_env = st.radio(
+            "KIS environment",
+            options=["mock", "real"],
+            index=0 if current_env == "mock" else 1,
+            horizontal=True,
+            help="Switches the active KIS account at runtime. Each env has "
+            "its own token cache and history DB.",
+        )
+        if new_env != current_env:
+            st.session_state[KIS_ENV_KEY] = new_env
+            # Force re-bootstrap of backfill against the new env's DB.
+            st.session_state[BACKFILL_DONE_KEY] = False
+            # Drop the LIVE flag on env switch as a safety re-arm.
+            st.session_state[LIVE_MODE_KEY] = False
+            st.rerun()
         st.markdown("### Safety")
         st.session_state[LIVE_MODE_KEY] = st.toggle(
             "LIVE Mode",
             value=st.session_state[LIVE_MODE_KEY],
             help="When off, all order actions are Dry-run regardless of KIS_ENV.",
         )
-        s = get_settings()
+        s = get_cached_settings()
         st.caption(f"`KIS_ENV={s.KIS_ENV}` · base `{s.base_url}`")
 
 
@@ -48,8 +75,16 @@ def is_live() -> bool:
     return bool(st.session_state.get(LIVE_MODE_KEY, False))
 
 
-@st.cache_resource(show_spinner=False)
 def get_cached_settings() -> Settings:
+    """Settings honoring any sidebar-selected KIS_ENV override.
+
+    Not actually cached: pydantic-settings' `Settings()` re-reads .env per call
+    but allows constructor kwargs to override individual fields. Calling this
+    per-rerun is fine — the UI makes few calls.
+    """
+    env_override = st.session_state.get(KIS_ENV_KEY)
+    if env_override and env_override != get_settings().KIS_ENV:
+        return Settings(KIS_ENV=env_override)  # type: ignore[call-arg]
     return get_settings()
 
 
