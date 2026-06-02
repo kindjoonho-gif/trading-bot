@@ -97,3 +97,20 @@ class RealizedPnLSummary(_Model):
     total_buy_amount: Decimal
     total_sell_amount: Decimal
     total_realized_pnl: Decimal
+
+
+class UnmatchedSellLeg(_Model):
+    symbol: Symbol
+    quantity: Decimal
+    avg_price: Decimal
+    ord_date: date
+    ord_time: str
+    odno: OrderId
+
+
+class RealizedPnLReport(_Model):
+    rows: tuple[RealizedPnLRow, ...]
+    total_buy_amount: Decimal
+    total_sell_amount: Decimal
+    total_realized_pnl: Decimal
+    unmatched_sells: tuple[UnmatchedSellLeg, ...]
