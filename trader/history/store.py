@@ -11,8 +11,9 @@ from typing import Any
 
 import aiosqlite
 
-from trader.domain.types import OrderId, Side, Symbol, Trade
+from trader.domain.types import OrderId, RealizedPnLReport, Side, Symbol, Trade
 from trader.history.migrations import apply_migrations
+from trader.history.pnl import compute_realized_pnl
 
 _LOCK_RETRIES = 3
 _LOCK_BASE_SLEEP_S = 0.05
@@ -112,6 +113,9 @@ class HistoryStore:
 
     async def count_trades(self) -> int:
         return await self._row_count()
+
+    async def realized_pnl(self, start: date, end: date) -> RealizedPnLReport:
+        return compute_realized_pnl(await self.list_trades(start, end))
 
     async def _row_count(self) -> int:
         conn = self._require_conn()

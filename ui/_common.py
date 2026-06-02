@@ -8,10 +8,13 @@ import streamlit as st
 
 from trader.brokers.kis import KISBroker
 from trader.config.settings import Settings, get_settings
+from trader.history.store import HistoryStore
+from trader.history.sync import run_backfill
 
 T = TypeVar("T")
 
 LIVE_MODE_KEY = "live_mode"
+BACKFILL_DONE_KEY = "_backfill_done"
 
 
 def init_session() -> None:
@@ -53,6 +56,15 @@ def make_broker() -> KISBroker:
     return KISBroker(get_cached_settings())
 
 
+def make_store() -> HistoryStore:
+    """Fresh HistoryStore per call. Same event-loop reasoning as make_broker.
+    Always use inside `try/finally` with `await store.close()`.
+    """
+    s = get_cached_settings()
+    s.history_db_path.parent.mkdir(parents=True, exist_ok=True)
+    return HistoryStore(s.history_db_path)
+
+
 def run_async[T](coro: Awaitable[T]) -> T:
     """Run an async coroutine from Streamlit's sync context."""
     try:
@@ -63,3 +75,34 @@ def run_async[T](coro: Awaitable[T]) -> T:
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
     return loop.run_until_complete(coro)
+
+
+async def _bootstrap() -> tuple[int, int]:
+    store = make_store()
+    await store.connect()
+    await store.apply_migrations()
+    broker = make_broker()
+    try:
+        summary = await run_backfill(broker, store, env=get_cached_settings().KIS_ENV)
+    finally:
+        await broker.aclose()
+        await store.close()
+    return summary.pulled, summary.inserted
+
+
+def bootstrap_backfill() -> None:
+    """Once per session, pull recent Fills from KIS into the local Store.
+
+    Best-effort: any error is shown as a non-fatal toast so the History page
+    still renders whatever the Store already has.
+    """
+    if st.session_state.get(BACKFILL_DONE_KEY):
+        return
+    try:
+        pulled, inserted = run_async(_bootstrap())
+        if pulled > 0:
+            st.toast(f"Backfill: pulled {pulled}, inserted {inserted}", icon="✅")
+    except Exception as e:
+        st.toast(f"Backfill skipped: {type(e).__name__}", icon="⚠️")
+    finally:
+        st.session_state[BACKFILL_DONE_KEY] = True

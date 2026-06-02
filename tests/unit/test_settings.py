@@ -66,3 +66,17 @@ class TestSettings:
         s = self._build(KIS_MOCK_ACCOUNT_NO="")
         with pytest.raises(ValueError, match="KIS_MOCK_ACCOUNT_NO"):
             s.require_credentials()
+
+    def test_history_db_path_default_per_env(self) -> None:
+        from pathlib import Path
+
+        s = self._build(KIS_ENV="mock")
+        assert s.history_db_path == Path("data") / "history_mock.sqlite"
+        s_real = self._build(KIS_ENV="real")
+        assert s_real.history_db_path == Path("data") / "history_real.sqlite"
+
+    def test_history_db_path_honors_override(self) -> None:
+        from pathlib import Path
+
+        s = self._build(KIS_ENV="mock", HISTORY_DB_DIR="/tmp/custom")
+        assert s.history_db_path == Path("/tmp/custom") / "history_mock.sqlite"

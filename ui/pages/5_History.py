@@ -5,13 +5,13 @@ from datetime import date, timedelta
 import pandas as pd
 import streamlit as st
 
-from trader.brokers.kis import KISApiError, KISAuthError
 from trader.domain.money import format_krw
-from trader.domain.types import Fill, RealizedPnLSummary
-from ui._common import make_broker, render_sidebar, run_async
+from trader.domain.types import RealizedPnLReport, Trade
+from ui._common import bootstrap_backfill, make_store, render_sidebar, run_async
 
 st.set_page_config(page_title="History · Autotrader", layout="wide")
 render_sidebar()
+bootstrap_backfill()
 
 st.title("History")
 
@@ -27,75 +27,68 @@ if start > end:
     st.stop()
 
 
-async def _fetch_fills(s: date, e: date) -> list[Fill]:
-    async with make_broker() as b:
-        return await b.list_fills(s, e)
+async def _fetch_trades(s: date, e: date) -> list[Trade]:
+    store = make_store()
+    await store.connect()
+    try:
+        return await store.list_trades(s, e)
+    finally:
+        await store.close()
 
 
-async def _fetch_pnl(s: date, e: date) -> RealizedPnLSummary:
-    async with make_broker() as b:
-        return await b.realized_pnl(s, e)
+async def _fetch_pnl(s: date, e: date) -> RealizedPnLReport:
+    store = make_store()
+    await store.connect()
+    try:
+        return await store.realized_pnl(s, e)
+    finally:
+        await store.close()
 
 
-st.subheader("Fills")
+st.subheader("Trades")
 try:
-    with st.spinner(f"Fetching fills {start} → {end}..."):
-        fills = run_async(_fetch_fills(start, end))
-except (KISAuthError, KISApiError) as e:
-    st.error(f"KIS error fetching fills: {e}")
-    fills = []
+    with st.spinner(f"Loading trades {start} → {end}..."):
+        trades = run_async(_fetch_trades(start, end))
 except Exception as e:
     st.error(f"Unexpected error: {type(e).__name__}: {e}")
-    fills = []
+    trades = []
 
-if not fills:
-    st.info("No fills in this window.")
+if not trades:
+    st.info("No trades in this window. The local history store backfills on app open.")
 else:
     df = pd.DataFrame(
         [
             {
-                "Time": f.fill_time.strftime("%Y-%m-%d %H:%M:%S"),
-                "Symbol": f.symbol,
-                "Side": f.side.value,
-                "Qty": int(f.quantity),
-                "Fill price ₩": format_krw(f.fill_price),
-                "Fees ₩": format_krw(f.fees),
+                "Date": t.ord_date.isoformat(),
+                "Time": f"{t.ord_time[:2]}:{t.ord_time[2:4]}:{t.ord_time[4:6]}",
+                "Symbol": t.symbol,
+                "Side": t.side.value,
+                "Qty": int(t.quantity),
+                "Avg price ₩": format_krw(t.avg_price),
+                "Order ID": t.odno,
             }
-            for f in fills
+            for t in trades
         ]
     )
     st.dataframe(df, hide_index=True, use_container_width=True)
-    st.caption(
-        "Fees column is always ₩0 — KIS inquire-daily-ccld does not surface "
-        "per-fill commission or sell-side tax."
-    )
 
-st.subheader("Realized P&L")
+st.subheader("Realized P&L (local FIFO, pre-fee)")
 try:
-    with st.spinner(f"Fetching realized P&L {start} → {end}..."):
+    with st.spinner(f"Computing realized P&L {start} → {end}..."):
         pnl = run_async(_fetch_pnl(start, end))
-except KISApiError as e:
-    st.warning(
-        f"Realized P&L unavailable for this account: {e}. "
-        "KIS mock typically doesn't support TR `TTTC8715R`; this works on a real account."
-    )
-    pnl = None
-except KISAuthError as e:
-    st.error(f"KIS auth error: {e}")
-    pnl = None
 except Exception as e:
     st.error(f"Unexpected error: {type(e).__name__}: {e}")
     pnl = None
 
 if pnl is not None:
     if not pnl.rows:
-        st.info("No realized P&L rows in this window.")
+        st.info("No matched realized P&L rows in this window.")
     else:
         df_pnl = pd.DataFrame(
             [
                 {
                     "Symbol": r.symbol,
-                    "Qty": int(r.quantity),
+                    "Qty matched": int(r.quantity),
                     "Buy amt ₩": format_krw(r.buy_amount),
                     "Sell amt ₩": format_krw(r.sell_amount),
                     "Realized P&L ₩": format_krw(r.realized_pnl),
@@ -109,3 +102,22 @@ if pnl is not None:
     col_buy.metric("Total buy", format_krw(pnl.total_buy_amount))
     col_sell.metric("Total sell", format_krw(pnl.total_sell_amount))
     col_pnl.metric("Grand total P&L", format_krw(pnl.total_realized_pnl))
+
+    if pnl.unmatched_sells:
+        st.warning(
+            f"{len(pnl.unmatched_sells)} sell leg(s) had no buy-side basis in the "
+            "retained history and are excluded from the matched total."
+        )
+        df_unmatched = pd.DataFrame(
+            [
+                {
+                    "Date": leg.ord_date.isoformat(),
+                    "Symbol": leg.symbol,
+                    "Qty unmatched": int(leg.quantity),
+                    "Sell price ₩": format_krw(leg.avg_price),
+                    "Order ID": leg.odno,
+                }
+                for leg in pnl.unmatched_sells
+            ]
+        )
+        st.dataframe(df_unmatched, hide_index=True, use_container_width=True)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from functools import cached_property
+from pathlib import Path
 from typing import Literal
 
 from pydantic import computed_field, field_validator
@@ -49,6 +50,8 @@ class Settings(BaseSettings):
     KIS_REAL_ACCOUNT_NO: str = ""
     KIS_REAL_BASE_URL: str = _REAL_BASE
 
+    HISTORY_DB_DIR: Path = Path("data")
+
     @field_validator("KIS_MOCK_ACCOUNT_NO", "KIS_REAL_ACCOUNT_NO")
     @classmethod
     def _validate_account_shape(cls, v: str) -> str:
@@ -78,6 +81,11 @@ class Settings(BaseSettings):
         if not raw:
             raise ValueError(f"KIS_{self.KIS_ENV.upper()}_ACCOUNT_NO is not set")
         return parse_account_no(raw)
+
+    @computed_field  # type: ignore[prop-decorator]
+    @cached_property
+    def history_db_path(self) -> Path:
+        return self.HISTORY_DB_DIR / f"history_{self.KIS_ENV}.sqlite"
 
     def require_credentials(self) -> None:
         missing = []

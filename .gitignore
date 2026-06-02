@@ -32,3 +32,6 @@ portfolios/*.yml
 .cache/
 *.token
 tickers_master_*.csv
+
+# Local history store
+/data/
