@@ -24,12 +24,20 @@ def init_session() -> None:
 
 
 def render_sidebar() -> None:
+    """Render the persistent sidebar widgets.
+
+    Streamlit multipage quirk: widget state bound by `key=` is dropped when the
+    user navigates to a different page, even though `st.session_state` survives.
+    Workaround: don't pass `key=`. Drive the widget purely via `value=` (read
+    from persistent storage) and write the return value back. Streamlit then
+    has no widget key to garbage-collect; we own the only state.
+    """
     init_session()
     with st.sidebar:
         st.markdown("### Safety")
-        st.toggle(
+        st.session_state[LIVE_MODE_KEY] = st.toggle(
             "LIVE Mode",
-            key=LIVE_MODE_KEY,
+            value=st.session_state[LIVE_MODE_KEY],
             help="When off, all order actions are Dry-run regardless of KIS_ENV.",
         )
         s = get_settings()
