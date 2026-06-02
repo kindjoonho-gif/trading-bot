@@ -17,6 +17,7 @@ from trader.portfolio.loader import load as load_portfolio
 from trader.rebalance.execute import RebalanceSummary, execute
 from trader.rebalance.plan import Plan, plan
 from trader.rebalance.rate_limiter import TokenBucket
+from trader.tickers import master
 from ui._common import (
     get_cached_settings,
     is_live,
@@ -24,6 +25,18 @@ from ui._common import (
     render_sidebar,
     run_async,
 )
+
+_CART_KEY = "rebalance_cart"
+if _CART_KEY not in st.session_state:
+    st.session_state[_CART_KEY] = []  # list[dict[str, str]]
+
+
+@st.cache_data(show_spinner=False)
+def _load_master_safe() -> object | None:
+    try:
+        return master.load()
+    except master.TickerMasterError:
+        return None
 
 _RATE_PER_SEC_MOCK = 2.0
 _RATE_PER_SEC_REAL = 20.0
@@ -47,6 +60,74 @@ if edit_col.button("Edit file", help="Open the YAML in your OS default editor"):
             os.system(f'xdg-open "{yaml_path}"')
     except OSError as e:
         st.error(f"Could not open editor: {e}")
+
+with st.expander("🔎 Build a holdings block from KOSPI master", expanded=False):
+    st.caption(
+        "Search → **+ Add** to drop a symbol into the cart. Set each weight, "
+        "then copy the generated YAML and paste into your portfolio file."
+    )
+    df_master = _load_master_safe()
+    if df_master is None:
+        st.info(
+            "No KOSPI master cached. Open the Tickers page and click "
+            "**Refresh master**, then come back."
+        )
+    else:
+        q = st.text_input(
+            "Search",
+            placeholder="삼성전자 / Samsung / 005930",
+            key="rb_lookup_query",
+        ).strip()
+        if q:
+            qf = q.casefold()
+            mask = (
+                df_master["symbol"].astype(str).str.startswith(q)
+                | df_master["name_ko"].fillna("").astype(str).str.casefold()
+                  .str.contains(qf, regex=False)
+                | df_master["name_en"].fillna("").astype(str).str.casefold()
+                  .str.contains(qf, regex=False)
+            )
+            hits = df_master.loc[mask, ["symbol", "name_ko", "name_en"]].head(15)
+            cart_symbols = {row["symbol"] for row in st.session_state[_CART_KEY]}
+            for row in hits.itertuples(index=False):
+                cols = st.columns([1, 3, 3, 1])
+                cols[0].code(row.symbol)
+                cols[1].write(row.name_ko)
+                cols[2].write(row.name_en or "—")
+                if row.symbol in cart_symbols:
+                    cols[3].write("✓")
+                elif cols[3].button("+ Add", key=f"rb_add_{row.symbol}"):
+                    st.session_state[_CART_KEY].append(
+                        {"symbol": row.symbol, "name_ko": row.name_ko, "weight": "0.10"}
+                    )
+                    st.rerun()
+
+    if st.session_state[_CART_KEY]:
+        st.markdown("**Cart**")
+        for i, entry in enumerate(st.session_state[_CART_KEY]):
+            cols = st.columns([1, 3, 2, 1])
+            cols[0].code(entry["symbol"])
+            cols[1].write(entry["name_ko"])
+            new_w = cols[2].text_input(
+                "Weight", value=entry["weight"], key=f"rb_w_{entry['symbol']}",
+                label_visibility="collapsed",
+            )
+            st.session_state[_CART_KEY][i]["weight"] = new_w
+            if cols[3].button("✕", key=f"rb_rm_{entry['symbol']}"):
+                st.session_state[_CART_KEY] = [
+                    e for e in st.session_state[_CART_KEY] if e["symbol"] != entry["symbol"]
+                ]
+                st.rerun()
+
+        snippet_lines = ["holdings:"]
+        for entry in st.session_state[_CART_KEY]:
+            comment = f"  # {entry['name_ko']}" if entry["name_ko"] else ""
+            snippet_lines.append(f'  "{entry["symbol"]}": {entry["weight"]}{comment}')
+        st.code("\n".join(snippet_lines), language="yaml")
+        st.caption("Copy → paste into your portfolio YAML (replace the `holdings:` block).")
+        if st.button("Clear cart", key="rb_clear_cart"):
+            st.session_state[_CART_KEY] = []
+            st.rerun()
 
 _RATE_LIMIT_SLEEP = 1.1
 

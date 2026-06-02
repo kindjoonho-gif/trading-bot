@@ -8,12 +8,61 @@ import streamlit as st
 from trader.brokers.kis import KISApiError, KISAuthError
 from trader.domain.types import Order, OrderId, OrderKind, OrderStatus, Side
 from trader.orders.form import OrderFormError, OrderRequest, validate_order_form
+from trader.tickers import master
 from ui._common import is_live, make_broker, render_sidebar, run_async
 
 st.set_page_config(page_title="Place Order · Autotrader", layout="wide")
 render_sidebar()
 
 st.title("Place Order")
+
+_SYMBOL_INPUT_KEY = "place_order_symbol"
+if _SYMBOL_INPUT_KEY not in st.session_state:
+    st.session_state[_SYMBOL_INPUT_KEY] = "005930"
+
+
+@st.cache_data(show_spinner=False)
+def _load_master_safe() -> object | None:
+    try:
+        return master.load()
+    except master.TickerMasterError:
+        return None
+
+
+with st.expander("🔎 Find a KOSPI symbol", expanded=False):
+    df = _load_master_safe()
+    if df is None:
+        st.info(
+            "No KOSPI master cached. Open the Tickers page and click "
+            "**Refresh master**, then come back."
+        )
+    else:
+        q = st.text_input(
+            "Search",
+            placeholder="삼성전자 / Samsung / 005930",
+            key="po_lookup_query",
+        ).strip()
+        if q:
+            qf = q.casefold()
+            mask = (
+                df["symbol"].astype(str).str.startswith(q)
+                | df["name_ko"].fillna("").astype(str).str.casefold().str.contains(qf, regex=False)
+                | df["name_en"].fillna("").astype(str).str.casefold().str.contains(qf, regex=False)
+            )
+            hits = df.loc[mask, ["symbol", "name_ko", "name_en"]].head(15)
+            if hits.empty:
+                st.caption("No matches.")
+            else:
+                for row in hits.itertuples(index=False):
+                    cols = st.columns([1, 3, 3, 1])
+                    cols[0].code(row.symbol)
+                    cols[1].write(row.name_ko)
+                    cols[2].write(row.name_en or "—")
+                    if cols[3].button("Use", key=f"po_use_{row.symbol}"):
+                        st.session_state[_SYMBOL_INPUT_KEY] = row.symbol
+                        st.rerun()
+        else:
+            st.caption("Type a symbol, Korean name, or English name to search.")
 
 _POLL_INTERVAL_S = 1.1
 _POLL_MAX = 10
@@ -47,7 +96,9 @@ async def _place_and_poll(req: OrderRequest) -> tuple[OrderId, Order | None]:
 
 with st.form("place_order_form", clear_on_submit=False):
     c1, c2, c3 = st.columns(3)
-    symbol_in = c1.text_input("Symbol", value="005930", help="6-digit KOSPI code")
+    symbol_in = c1.text_input(
+        "Symbol", key=_SYMBOL_INPUT_KEY, help="6-digit KOSPI code"
+    )
     side_in = c2.selectbox("Side", options=[Side.BUY, Side.SELL], format_func=lambda s: s.value)
     kind_in = c3.selectbox(
         "Kind", options=[OrderKind.MARKET, OrderKind.LIMIT], format_func=lambda k: k.value
