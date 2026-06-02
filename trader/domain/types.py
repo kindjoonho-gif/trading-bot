@@ -71,6 +71,7 @@ class Fill(_Model):
     fill_price: Decimal
     fill_time: datetime
     fees: Decimal
+    odno: OrderId
 
 
 class Trade(_Model):

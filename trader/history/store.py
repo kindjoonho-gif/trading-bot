@@ -110,6 +110,9 @@ class HistoryStore:
             for r in rows
         ]
 
+    async def count_trades(self) -> int:
+        return await self._row_count()
+
     async def _row_count(self) -> int:
         conn = self._require_conn()
         async with conn.execute("SELECT COUNT(*) FROM trades") as cur:
