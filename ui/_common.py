@@ -8,6 +8,7 @@ import streamlit as st
 
 from trader.brokers.kis import KISBroker
 from trader.config.settings import Settings, get_settings, reset_settings_cache
+from trader.domain.types import Exchange
 from trader.history.store import HistoryStore
 from trader.history.sync import run_backfill
 
@@ -15,7 +16,10 @@ T = TypeVar("T")
 
 LIVE_MODE_KEY = "live_mode"
 KIS_ENV_KEY = "kis_env"
+EXCHANGE_KEY = "exchange"
 BACKFILL_DONE_KEY = "_backfill_done"
+
+_EXCHANGES: list[Exchange] = ["KRX", "NXT", "SOR"]
 
 
 def init_session() -> None:
@@ -31,6 +35,8 @@ def init_session() -> None:
         st.session_state[KIS_ENV_KEY] = get_settings().KIS_ENV
     if LIVE_MODE_KEY not in st.session_state:
         st.session_state[LIVE_MODE_KEY] = False
+    if EXCHANGE_KEY not in st.session_state:
+        st.session_state[EXCHANGE_KEY] = "KRX"
 
 
 def render_sidebar() -> None:
@@ -61,6 +67,22 @@ def render_sidebar() -> None:
             # Drop the LIVE flag on env switch as a safety re-arm.
             st.session_state[LIVE_MODE_KEY] = False
             st.rerun()
+        st.markdown("### Exchange")
+        current_ex = st.session_state[EXCHANGE_KEY]
+        new_ex = st.radio(
+            "Order routing",
+            options=_EXCHANGES,
+            index=_EXCHANGES.index(current_ex),
+            horizontal=True,
+            help=(
+                "KRX = regular Korea Exchange (정규장 hours). "
+                "NXT = NEXTRADE alt venue (pre/after-hours). "
+                "SOR = Smart Order Routing (KIS picks best venue)."
+            ),
+        )
+        if new_ex != current_ex:
+            st.session_state[EXCHANGE_KEY] = new_ex
+            st.rerun()
         st.markdown("### Safety")
         st.session_state[LIVE_MODE_KEY] = st.toggle(
             "LIVE Mode",
@@ -68,7 +90,10 @@ def render_sidebar() -> None:
             help="When off, all order actions are Dry-run regardless of KIS_ENV.",
         )
         s = get_cached_settings()
-        st.caption(f"`KIS_ENV={s.KIS_ENV}` · base `{s.base_url}`")
+        st.caption(
+            f"`KIS_ENV={s.KIS_ENV}` · exchange `{st.session_state[EXCHANGE_KEY]}` · "
+            f"base `{s.base_url}`"
+        )
 
 
 def is_live() -> bool:
@@ -88,15 +113,22 @@ def get_cached_settings() -> Settings:
     return get_settings()
 
 
-def make_broker() -> KISBroker:
+def current_exchange() -> Exchange:
+    return st.session_state.get(EXCHANGE_KEY, "KRX")
+
+
+def make_broker(exchange: Exchange | None = None) -> KISBroker:
     """Construct a fresh KISBroker (owning its own httpx.AsyncClient).
 
     Not cached across reruns: a cached httpx client's asyncio primitives bind
     to its creation-time event loop, but Streamlit reruns spawn fresh loops
     via run_async, causing "bound to a different event loop" errors.
     Always use inside `async with` so the client is closed cleanly.
+
+    `exchange` defaults to the sidebar-selected routing; pass a value to
+    override for a single order (e.g. force KRX during a session set to NXT).
     """
-    return KISBroker(get_cached_settings())
+    return KISBroker(get_cached_settings(), exchange=exchange or current_exchange())
 
 
 def make_store() -> HistoryStore:

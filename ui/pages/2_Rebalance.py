@@ -19,6 +19,7 @@ from trader.rebalance.plan import Plan, plan
 from trader.rebalance.rate_limiter import TokenBucket
 from trader.tickers import master
 from ui._common import (
+    current_exchange,
     get_cached_settings,
     is_live,
     make_broker,
@@ -46,6 +47,14 @@ render_sidebar()
 
 st.title("Rebalance")
 st.caption("Plan only — execution lands in I7 (#9).")
+
+_active_ex = current_exchange()
+if _active_ex != "KRX":
+    st.warning(
+        f"Sidebar routing is **{_active_ex}**. Rebalance submits MARKET orders, "
+        f"which NXT after-market sessions reject (`APBK3013`). Switch to KRX in "
+        "the sidebar before executing, or wait for KRX regular hours."
+    )
 
 default_path = str(Path("portfolios/example.yaml").resolve())
 path_col, edit_col = st.columns([5, 1])

@@ -3,12 +3,14 @@ from __future__ import annotations
 from datetime import date, datetime
 from decimal import Decimal
 from enum import StrEnum
-from typing import NewType
+from typing import Literal, NewType
 
 from pydantic import BaseModel, ConfigDict
 
 Symbol = NewType("Symbol", str)
 OrderId = NewType("OrderId", str)
+
+Exchange = Literal["KRX", "NXT", "SOR"]
 
 
 class Side(StrEnum):

@@ -528,6 +528,25 @@ class TestPlaceOrder:
                         Symbol("005930"), Side.BUY, OrderKind.MARKET, Decimal("1")
                     )
 
+    @pytest.mark.asyncio
+    async def test_nxt_exchange_sent_when_configured(self, tmp_path: Path) -> None:
+        async with httpx.AsyncClient(base_url=MOCK_BASE) as c:
+            with respx.mock(base_url=MOCK_BASE) as router:
+                router.post("/oauth2/tokenP").respond(
+                    200, json={"access_token": "tok", "expires_in": 86400}
+                )
+                route = router.post("/uapi/domestic-stock/v1/trading/order-cash").respond(
+                    200, json={"rt_cd": "0", "output": {"ODNO": "0000999"}}
+                )
+                broker = KISBroker(
+                    make_settings(), cache_dir=tmp_path, http_client=c, exchange="NXT"
+                )
+                await broker.place_order(
+                    Symbol("005930"), Side.BUY, OrderKind.MARKET, Decimal("1")
+                )
+                body = json.loads(route.calls[0].request.content)
+                assert body["EXCG_ID_DVSN_CD"] == "NXT"
+
 
 def _order_row(**overrides: str) -> dict[str, str]:
     base = {

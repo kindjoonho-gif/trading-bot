@@ -14,6 +14,7 @@ from trader.brokers.base import Broker
 from trader.config.settings import Settings
 from trader.domain.money import to_decimal
 from trader.domain.types import (
+    Exchange,
     Fill,
     Order,
     OrderId,
@@ -104,9 +105,11 @@ class KISBroker(Broker):
         settings: Settings,
         cache_dir: Path | None = None,
         http_client: httpx.AsyncClient | None = None,
+        exchange: Exchange = "KRX",
     ) -> None:
         settings.require_credentials()
         self._settings = settings
+        self._exchange: Exchange = exchange
         self._cache = _TokenCache(
             env=settings.KIS_ENV,
             cache_dir=cache_dir or Path(".cache"),
@@ -304,7 +307,7 @@ class KISBroker(Broker):
             "ORD_DVSN": ord_dvsn,
             "ORD_QTY": str(int(quantity)),
             "ORD_UNPR": "0" if kind is OrderKind.MARKET else str(price),
-            "EXCG_ID_DVSN_CD": "KRX",
+            "EXCG_ID_DVSN_CD": self._exchange,
             "SLL_TYPE": "01" if side is Side.SELL else "",
             "CNDT_PRIC": "",
         }
@@ -348,7 +351,7 @@ class KISBroker(Broker):
             "INQR_DVSN_1": "",
             "CTX_AREA_FK100": "",
             "CTX_AREA_NK100": "",
-            "EXCG_ID_DVSN_CD": "KRX",
+            "EXCG_ID_DVSN_CD": self._exchange,
         }
         url = "/uapi/domestic-stock/v1/trading/inquire-daily-ccld"
         resp = await self._client.get(url, headers=await self._headers(tr_id), params=params)
@@ -408,7 +411,7 @@ class KISBroker(Broker):
             "ORD_QTY": str(int(to_decimal(row.get("ord_qty", "0")))),
             "ORD_UNPR": "0",
             "QTY_ALL_ORD_YN": "Y",
-            "EXCG_ID_DVSN_CD": "KRX",
+            "EXCG_ID_DVSN_CD": self._exchange,
         }
         url = "/uapi/domestic-stock/v1/trading/order-rvsecncl"
         resp = await self._client.post(url, headers=await self._headers(tr_id), json=body)
@@ -456,7 +459,7 @@ class KISBroker(Broker):
                 "INQR_DVSN_1": "",
                 "CTX_AREA_FK100": fk100,
                 "CTX_AREA_NK100": nk100,
-                "EXCG_ID_DVSN_CD": "KRX",
+                "EXCG_ID_DVSN_CD": self._exchange,
             }
             headers = await self._headers(tr_id)
             if tr_cont:
@@ -513,7 +516,7 @@ class KISBroker(Broker):
                 "INQR_DVSN_1": "",
                 "CTX_AREA_FK100": fk100,
                 "CTX_AREA_NK100": nk100,
-                "EXCG_ID_DVSN_CD": "KRX",
+                "EXCG_ID_DVSN_CD": self._exchange,
             }
             headers = await self._headers(tr_id)
             if tr_cont:

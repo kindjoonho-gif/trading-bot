@@ -3,7 +3,9 @@
 broker: KIS
 
 holdings:
-  "411060": 0.01     # ACE 금 ETF
+  "005930": 0.10  # 삼성전자
+  "000660": 0.10  # SK하이닉스
+  "411060": 0.10  # ACE KRX금현물
   # residual 0.30 stays as cash
 
 drift_tolerance: 0.01
