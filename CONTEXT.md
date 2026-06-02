@@ -40,7 +40,11 @@ An Order with a price ceiling (buy) or floor (sell); waits in the order book unt
 A snapshot of the current bid, ask, and last-traded price for one Symbol at one instant. Snapshots are point-in-time — a fresh Quote is required for each compute.
 
 **Fill**:
-A confirmation from the Broker that an Order executed at a specific price and quantity. An Order may produce one Fill (full) or several (partial).
+A confirmation from the Broker that an Order executed at a specific price and quantity. An Order may produce one Fill (full) or several (partial). Wire-level event — what a Venue reports.
+
+**Trade**:
+The historical record of a completed Order — its terminal state as one row: Symbol, Side, filled quantity, average fill price, order date and time. Equivalent to "sum of an Order's Fills" but persisted by date. The unit stored in the History Store. Some Venues (incl. KIS daily-ccld) only expose history at this grain, not per-Fill.
+_Avoid_: Fill (Fill is the wire event; Trade is the persisted record).
 
 **Cancel**:
 An instruction to withdraw an unfilled or partially-filled Order from the Venue's order book.
@@ -94,10 +98,19 @@ A UI runtime toggle that, when **off**, forces Dry-run regardless of which Accou
 **Dry-run**:
 A Rebalance or single Order action that computes and displays the Plan but does not submit anything to the Broker.
 
+### History
+
+**History Store**:
+A local persisted record of Trades, kept across app restarts and beyond what a Venue retains. One Store per Account environment (Mock Account and Live Account never share a Store). Backfilled from the Broker on a schedule. Read by the UI's History view; the Broker is not a History reader.
+_Avoid_: cache (a Cache is recomputable from a live source; the History Store is the only place old Trades survive), database (too generic).
+
+**Backfill**:
+An idempotent sync that pulls recent Trades from the Broker and writes them to the History Store. Re-runnable; existing Trades are not duplicated. Runs on app open and on a daily schedule.
+
 ## Flagged ambiguities
 
 - **"Market"** appears in two unrelated senses: the **Venue** (e.g. "the KOSPI market") and the **Market Order** type. Always qualify in writing — "KOSPI Venue" or "Market Order" — never bare "market."
-- **"Order"** vs **"Trade"** vs **"Fill"**: Order = pre-execution intent. Fill = the Broker event confirming partial or full execution. Trade = historical record of a completed Order (sum of its Fills). Phase A does not surface Trade as a distinct concept; the History view shows Fills grouped by Order.
+- **"Order"** vs **"Trade"** vs **"Fill"**: Order = pre-execution intent. Fill = the Broker event confirming partial or full execution. Trade = historical record of a completed Order, persisted by date. Phase A surfaced only the Fill via `KISBroker.list_fills`; Phase B's History Store is the canonical home of Trades.
 - **"Cancel"**: refers only to user-initiated withdrawal of an open Order. Broker-side rejections (insufficient cash, market closed, etc.) are *Rejections*, not Cancels.
 
 ## Example dialogue
