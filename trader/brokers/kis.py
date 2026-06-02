@@ -664,6 +664,7 @@ def _row_to_fill(row: dict[str, Any]) -> Fill:
         fill_price=price,
         fill_time=fill_time,
         fees=Decimal("0"),
+        odno=OrderId(str(row.get("odno", ""))),
     )
 
 
