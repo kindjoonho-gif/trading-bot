@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 from enum import StrEnum
 from typing import NewType
@@ -71,6 +71,16 @@ class Fill(_Model):
     fill_price: Decimal
     fill_time: datetime
     fees: Decimal
+
+
+class Trade(_Model):
+    symbol: Symbol
+    side: Side
+    quantity: Decimal
+    avg_price: Decimal
+    ord_date: date
+    ord_time: str
+    odno: OrderId
 
 
 class RealizedPnLRow(_Model):
