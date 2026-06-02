@@ -2,50 +2,52 @@
 
 The local **History Store** (`data/history_{KIS_ENV}.sqlite`) is backfilled by
 the Streamlit app on open, but the app is not always open at KRX close. To
-guarantee daily capture, register a Windows Task Scheduler job that runs
-`python -m trader.history.sync` after KRX close (~16:00 KST).
+guarantee daily capture, register a Windows Task Scheduler job that runs the
+sync after KRX close (~16:00 KST).
 
-## One-time setup
+The CLI entry point is `python -m trader.history` (which runs
+`trader/history/__main__.py`). Do **not** call `python -m trader.history.sync`
+— that imports the module without executing anything and exits silently.
 
-From an elevated PowerShell, replace the python path with the project's `.venv`
-copy and run:
+## One-time setup (recommended via bundled batch wrapper)
 
-```powershell
-schtasks /Create /SC DAILY /ST 16:00 /TN "AutotraderHistorySync" `
-  /TR "C:\path\to\autotrader\.venv\Scripts\python.exe -m trader.history.sync" /F
-```
-
-Or via the GUI (Task Scheduler → Create Basic Task):
-- **Trigger**: Daily, 16:00 KST, weekdays only
-- **Action**: Start a program — `C:\path\to\autotrader\.venv\Scripts\python.exe`
-- **Arguments**: `-m trader.history.sync`
-- **Start in**: `C:\path\to\autotrader`
-
-## Logging
-
-The CLI writes a one-line summary to stdout. Redirect inside the scheduled task
-command to capture history:
+`scripts/sync_history.bat` handles working directory, env vars, unbuffered
+stdout, and appending to `data/sync.log`. Register one task per env so both
+the Mock and Real history DBs stay current:
 
 ```powershell
-schtasks /Create /SC DAILY /ST 16:00 /TN "AutotraderHistorySync" `
-  /TR "cmd /c C:\path\to\autotrader\.venv\Scripts\python.exe -m trader.history.sync >> C:\path\to\autotrader\data\sync.log 2>&1" /F
+$bat = "C:\path\to\autotrader\scripts\sync_history.bat"
+schtasks /Create /SC DAILY /ST 16:00 /TN "AutotraderHistorySync-Mock" `
+  /TR "$bat mock" /F
+schtasks /Create /SC DAILY /ST 16:05 /TN "AutotraderHistorySync-Real" `
+  /TR "$bat real" /F
 ```
+
+The wrapper accepts the env name as its single argument (`mock` or `real`),
+defaulting to `mock` if omitted. Five-minute stagger between tasks avoids
+sharing token-issuance rate-limit windows.
 
 ## Verifying
 
 ```powershell
-schtasks /Query /TN "AutotraderHistorySync"
-schtasks /Run /TN "AutotraderHistorySync"
+schtasks /Query /TN "AutotraderHistorySync-Mock"
+schtasks /Run   /TN "AutotraderHistorySync-Mock"
+Get-Content C:\path\to\autotrader\data\sync.log -Tail 10
+Get-ScheduledTaskInfo -TaskName "AutotraderHistorySync-Mock" | Format-List LastRunTime, LastTaskResult
 ```
 
-Then `Get-Content data\history_mock.sqlite` should be larger than before and
-`Get-Content data\sync.log -Tail 5` should show the latest summary.
+A successful run appends a line like
+`pulled=N inserted=M already=K window=YYYY-MM-DD..YYYY-MM-DD db=data\history_mock.sqlite`
+to `data/sync.log`. The job is idempotent — re-running mid-day produces
+`inserted=0` on a steady-state Store.
 
 ## Notes
 
-- The CLI uses the active `KIS_ENV` from `.env`. To backfill the real-account
-  Store as well, schedule a second task that prepends `set KIS_ENV=real`.
-- The job is idempotent — re-running mid-day is safe and produces
-  `inserted=0` on a steady-state Store.
+- The wrapper sets `PYTHONUNBUFFERED=1` so prints flush through the redirect.
+  Without it, Windows buffers stdout when not attached to a console and the
+  log appears empty even though the task succeeds.
+- The CLI passes `EXCG_ID_DVSN_CD=KRX` by default. NXT/SOR routing is a
+  per-Streamlit-session UI choice, not relevant to backfill (read-only).
 - Detection of "did the scheduler actually run today" is intentionally out of
-  scope. The on-app-open backfill is the safety net.
+  scope. The on-app-open backfill in `ui/_common.bootstrap_backfill()` is the
+  safety net.
